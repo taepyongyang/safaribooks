@@ -1,14 +1,17 @@
 import re
-import requests
-import safaribooks
+# safaribooks import is no longer needed for base URLs or headers.
+from safaribooks_zero.exceptions import (
+    SafariBooksError,
+    NetworkConnectionError,
+    HttpRequestError,
+    UserAccountError,
+    CSRFTokenError
+)
+from safaribooks_zero.http_client import HttpClient
+import safaribooks_zero.config as config # Import the config module
 
-REGISTER_URL = safaribooks.SAFARI_BASE_URL + "/register/"
-CHECK_EMAIL = safaribooks.SAFARI_BASE_URL + "/check-email-availability/"
-CHECK_PWD = safaribooks.SAFARI_BASE_URL + "/check-password/"
-
-# DEBUG
-USE_PROXY = False
-PROXIES = {"https": "https://127.0.0.1:8080"}
+# URLs are now sourced from config
+# No need for DEBUG USE_PROXY and PROXIES here, HttpClient will use config values.
 
 CSRF_TOKEN_RE = re.compile(r"(?<=name='csrfmiddlewaretoken' value=')([^']+)")
 
@@ -24,130 +27,117 @@ class Register:
 
         self.csrf = None
 
-        self.session = requests.Session()
-        if USE_PROXY:  # DEBUG
-            self.session.proxies = PROXIES
-            self.session.verify = False
+        # Merge default headers with registration-specific headers
+        # HttpClient will be initialized with these merged headers.
+        # Proxies and SSL verification will be handled by HttpClient using config defaults
+        # if not overridden here (though we will use config defaults by not passing them).
+        merged_headers = config.DEFAULT_REQUEST_HEADERS.copy()
+        merged_headers.update(config.REGISTER_REQUEST_HEADERS)
+        
+        self.http_client = HttpClient(
+            base_headers=merged_headers,
+            # Proxies and verify_ssl will use defaults from HttpClient,
+            # which should ideally also use the config.py for its defaults.
+            # For now, assuming HttpClient's defaults are sufficient or it picks from config.
+            # If HttpClient needs explicit proxy config:
+            proxies=config.PROXIES if config.USE_PROXY else None,
+            verify_ssl=not config.USE_PROXY
+        )
 
-        self.session.headers.update(safaribooks.SafariBooks.HEADERS)
-        self.session.headers.update({
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": REGISTER_URL
-        })
-
-        self.register()
-
-    def handle_cookie_update(self, set_cookie_headers):
-        for morsel in set_cookie_headers:
-            # Handle Float 'max-age' Cookie
-            if safaribooks.SafariBooks.COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
-                cookie_key, cookie_value = morsel.split(";")[0].split("=")
-                self.session.cookies.set(cookie_key, cookie_value)
-
-    def requests_provider(self, url, is_post=False, data=None, perform_redirect=True, check_200=True, **kwargs):
-        try:
-            response = getattr(self.session, "post" if is_post else "get")(
-                url,
-                data=data,
-                allow_redirects=False,
-                **kwargs
-            )
-
-            self.handle_cookie_update(response.raw.headers.getlist("Set-Cookie"))
-
-        except (requests.ConnectionError, requests.ConnectTimeout, requests.RequestException) as request_exception:
-            print("Error: ", str(request_exception))
-            return 0
-
-        if response.is_redirect and perform_redirect:
-            return self.requests_provider(response.next.url, is_post, None, perform_redirect, check_200, **kwargs)
-
-        if check_200 and response.status_code != 200:
-            print("Invalid response code:\n", response.text)
-            return 0
-
-        return response
+        # self.register() # Removed automatic call
 
     def register(self):
         # Take first cookie + csrf
-        response = self.requests_provider(REGISTER_URL)
-        if response == 0:
-            print("Error 0x1: unable to reach registration page!")
-            exit(1)
+        try:
+            response = self.http_client.get(config.REGISTER_URL) # Use config URL
+        except NetworkConnectionError as e:
+            raise NetworkConnectionError("Unable to reach registration page during initial CSRF fetch.") from e
+        except HttpRequestError as e:
+            raise HttpRequestError(f"HTTP error during initial CSRF fetch: {e.status_code}", status_code=e.status_code, response_text=e.response_text) from e
 
-        if "csrfmiddlewaretoken' value='" not in response.text:
-            print("Error 0x2: CSRF token not present")
-            exit(1)
+        if "csrfmiddlewaretoken' value='" not in response.text: # type: ignore
+            raise CSRFTokenError("CSRF token not present in registration page response.")
 
-        csrf_search = CSRF_TOKEN_RE.findall(response.text)
+        csrf_search = CSRF_TOKEN_RE.findall(response.text) # type: ignore
         if not len(csrf_search):
-            print("Error 0x3: CSRF token RE error")
-            exit(1)
+            raise CSRFTokenError("CSRF token could not be extracted using regex.")
 
         self.csrf = csrf_search[0]
 
         # Check user validity
-        response = self.requests_provider(CHECK_EMAIL, params={"email": self.email})
-        if response == 0:
-            print("Error 0x4: unable to check email!")
-            exit(1)
+        try:
+            response = self.http_client.get(config.CHECK_EMAIL_URL, params={"email": self.email}) # Use config URL
+        except NetworkConnectionError as e:
+            raise NetworkConnectionError("Unable to check email availability due to network error.") from e
+        except HttpRequestError as e:
+            raise HttpRequestError(f"HTTP error while checking email: {e.status_code}", status_code=e.status_code, response_text=e.response_text) from e
 
-        response_dict = response.json()
+        response_dict = response.json() # type: ignore
         if not response_dict["success"]:
-            print("Error 0x5:", response_dict["message"])
-            exit(1)
+            raise UserAccountError(f"Email check failed: {response_dict.get('message', 'No message provided')}")
 
         # Check password validity
-        response = self.requests_provider(CHECK_PWD, is_post=True, data={
-            "csrfmiddlewaretoken": self.csrf,
-            "password1": self.password,
-            "field_name": "password1"
-        })
-        if response == 0:
-            print("Error 0x6: unable to check password!")
-            exit(1)
+        try:
+            response = self.http_client.post(config.CHECK_PWD_URL, data={ # Use config URL
+                "csrfmiddlewaretoken": self.csrf,
+                "password1": self.password,
+                "field_name": "password1"
+            })
+        except NetworkConnectionError as e:
+            raise NetworkConnectionError("Unable to check password validity due to network error.") from e
+        except HttpRequestError as e:
+            raise HttpRequestError(f"HTTP error while checking password: {e.status_code}", status_code=e.status_code, response_text=e.response_text) from e
 
-        response_dict = response.json()
+        response_dict = response.json() # type: ignore
         if not response_dict["valid"]:
-            print("Error 0x7:", response_dict["msg"])
-            exit(1)
+            raise UserAccountError(f"Password check failed: {response_dict.get('msg', 'No message provided')}")
 
         # Register
-        response = self.requests_provider(REGISTER_URL, is_post=True, data={
-            "next": "",
-            "trial_length": 10,
-            "csrfmiddlewaretoken": self.csrf,
-            "first_name": self.first_name,
-            "last_name": self.second_name,
-            "email": self.email,
-            "password1": self.password,
-            "country": self.country,
-            "referrer": "podcast",
-            "recently_viewed_bits": "[]"
-        }, check_200=False)
-        if response == 0:
-            print("Error 0x8: unable to register!")
-            exit(1)
-
-        elif response.status_code != 201:
-            print("Error: 0x9: invalid status code while registering!")
-            exit(1)
-
-        print("[*] Account registered: \nEMAIL: %s\nPASSWORD: %s" % (self.email, self.password))
-        return
+        try:
+            response = self.http_client.post(config.REGISTER_URL, data={ # Use config URL
+                "next": "",
+                "trial_length": 10,
+                "csrfmiddlewaretoken": self.csrf,
+                "first_name": self.first_name,
+                "last_name": self.second_name,
+                "email": self.email,
+                "password1": self.password,
+                "country": self.country,
+                "referrer": "podcast",
+                "recently_viewed_bits": "[]"
+            }, expected_status_codes=[201]) # check_status_code is True by default
+        except NetworkConnectionError as e:
+            raise NetworkConnectionError("Unable to submit registration due to network error.") from e
+        except HttpRequestError as e: # This will be raised by HttpClient if status is not 201
+            raise HttpRequestError(
+                f"Registration failed. Expected status 201 but got {e.status_code}.",
+                status_code=e.status_code,
+                response_text=e.response_text
+            ) from e
+        
+        success_message = f"[*] Account registered: \nEMAIL: {self.email}\nPASSWORD: {self.password}"
+        return success_message
 
 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
         print("[!] Error: too few arguments.\nRun `register_user.py EMAIL PASSWORD`.")
-        exit(1)
+        sys.exit(1)
 
     elif len(sys.argv) > 3:
         print("[!] Error: too much arguments, try to enclose the string with quote '\"'.")
-        exit(1)
+        sys.exit(1)
 
     FIRST_NAME = "Safari"
     SECOND_NAME = "Download"
 
-    Register(sys.argv[1], sys.argv[2], FIRST_NAME, SECOND_NAME)
+    try:
+        registrar = Register(sys.argv[1], sys.argv[2], FIRST_NAME, SECOND_NAME)
+        registration_result = registrar.register()
+        print(registration_result) # Print the success message from register()
+    except SafariBooksError as e:
+        print(f"Registration failed: {e}")
+        if hasattr(e, 'response_text') and e.response_text:
+            print(f"Server response: {e.response_text}")
+        sys.exit(1)
