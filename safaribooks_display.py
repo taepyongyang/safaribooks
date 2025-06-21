@@ -46,7 +46,8 @@ class Display:
         self.book_ad_info = False
         self.css_ad_info = Value("i", 0)
         self.images_ad_info = Value("i", 0)
-        self.last_request = (None,)
+        # self.last_request = (None,)
+        self.last_request: tuple[str, str | None, dict, int, str, str] = ("", None, {}, 0, "", "")
         self.in_error = False
 
         self.state_status = Value("i", 0)
