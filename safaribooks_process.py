@@ -503,7 +503,10 @@ class SafariBooks:
                     del css.attrib["data-template"]
 
                 try:
-                    page_css += html.tostring(css, method="xml", encoding='unicode') + "\n"
+                    css_str = html.tostring(css, method="xml", encoding='unicode')
+                    if isinstance(css_str, (bytes, bytearray, memoryview)):
+                        css_str = css_str.tobytes().decode('utf-8') if isinstance(css_str, memoryview) else css_str.decode('utf-8')
+                    page_css += css_str + "\n"
 
                 except (html.etree.ParseError, html.etree.ParserError) as parsing_error:
                     self.display.error(parsing_error)
@@ -651,7 +654,7 @@ class SafariBooks:
                          "    please delete the output directory '" + self.BOOK_PATH + "' and restart the program.")
                          % self.filename.replace(".html", ".xhtml")
                     )
-                    self.display.book_ad_info = 2
+                    self.display.book_ad_info = True
 
             else:
                 self.save_page_html(self.parse_html(self.get_html(next_chapter["content"]), first_page))
@@ -673,6 +676,7 @@ class SafariBooks:
             response = self.requests_provider(url)
             if response == 0:
                 self.display.error("Error trying to retrieve this CSS: %s\n    From: %s" % (css_file, url))
+                return
 
             with open(css_file, 'wb') as s:
                 s.write(response.content)
