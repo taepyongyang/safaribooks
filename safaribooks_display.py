@@ -1,14 +1,16 @@
-import os
-import sys
-import shutil
 import logging
+import os
+import shutil
+import sys
 import traceback
-from random import random
-from lxml import html
 from multiprocessing import Value
+from random import random
+
+from lxml import html
 
 # Import configuration constants
-from safaribooks_config import PATH, COOKIES_FILE, SAFARI_BASE_URL
+from safaribooks_config import COOKIES_FILE, PATH, SAFARI_BASE_URL
+
 
 class Display:
     """

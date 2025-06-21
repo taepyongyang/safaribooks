@@ -1,19 +1,31 @@
-from safaribooks_config import ORLY_BASE_URL, SAFARI_BASE_URL, API_ORIGIN_URL, PROFILE_URL, COOKIES_FILE, PATH, USE_PROXY, PROXIES
-from safaribooks_winqueue import WinQueue
-from safaribooks_display import Display
-import os
-import sys
-import re
 import json
-import shutil
+import os
 import pathlib
+import re
+import shutil
+import sys
 from html import escape
-from queue import Queue
-from urllib.parse import urlparse, urljoin, parse_qs, quote_plus
-from random import random
-import requests
-from lxml import html, etree
 from multiprocessing import Process
+from queue import Queue
+from random import random
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+
+import requests
+from lxml import etree, html
+
+from safaribooks_config import (
+    API_ORIGIN_URL,
+    COOKIES_FILE,
+    ORLY_BASE_URL,
+    PATH,
+    PROFILE_URL,
+    PROXIES,
+    SAFARI_BASE_URL,
+    USE_PROXY,
+)
+from safaribooks_display import Display
+from safaribooks_winqueue import WinQueue
+
 
 class SafariBooks:
     """
