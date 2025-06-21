@@ -140,11 +140,11 @@ class Display:
         output = self.SH_YELLOW + ("""
        ____     ___         _
       / __/__ _/ _/__ _____(_)
-     _\ \/ _ `/ _/ _ `/ __/ /
-    /___/\_,_/_/ \_,_/_/ /_/
+     _\\ \\/ _ `/ _/ _ `/ __/ /
+    /___/\\_,_/_/ \\_,_/_/ /_/
       / _ )___  ___  / /__ ___
-     / _  / _ \/ _ \/  '_/(_-<
-    /____/\___/\___/_/\_\/___/
+     / _  / _ \\/ _ \\/  '_/(_-<
+    /____/\\___/\\___/_/\\_\\/___/
 """ if random() > 0.5 else """
  ██████╗     ██████╗ ██╗  ██╗   ██╗██████╗
 ██╔═══██╗    ██╔══██╗██║  ╚██╗ ██╔╝╚════██╗
@@ -195,7 +195,7 @@ class Display:
         self.info("Done: %s\n\n" % epub_file +
                   "    If you like it, please * this project on GitHub to make it known:\n"
                   "        https://github.com/lorenzodifuccia/safaribooks\n"
-                  "    e don't forget to renew your Safari Books Online subscription:\n"
+                  "    Please don't forget to renew your Safari Books Online subscription:\n"
                   "        " + SAFARI_BASE_URL + "\n\n" +
                   self.SH_BG_RED + "[!]" + self.SH_DEFAULT + " Bye!!")
 
