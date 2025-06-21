@@ -39,6 +39,9 @@ from safaribooks_config import (
     ORLY_BASE_URL, SAFARI_BASE_URL, API_ORIGIN_URL, PROFILE_URL, USE_PROXY, PROXIES
 )
 
+# Import WinQueue workaround for Windows
+from safaribooks_winqueue import WinQueue
+
 
 ## Configuration constants are now imported from safari_config.py
 ## The constants have been removed from this file.
@@ -228,16 +231,7 @@ class Display:
         return message
 
 
-class WinQueue(list):
-    """
-    Multiprocessing queue workaround for Windows compatibility.
-    Used when the standard multiprocessing.Queue causes pickling errors on Windows.
-    """
-    def put(self, el):
-        self.append(el)
-
-    def qsize(self):
-        return self.__len__()
+## WinQueue is now imported from safaribooks_winqueue.py
 
 
 class SafariBooks:
