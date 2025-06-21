@@ -788,9 +788,9 @@ class SafariBooks:
         )
 
     @staticmethod
-    def parse_toc(l, c=0, mx=0):
+    def parse_toc(toc_list, c=0, mx=0):
         r = ""
-        for cc in l:
+        for cc in toc_list:
             c += 1
             if int(cc["depth"]) > mx:
                 mx = int(cc["depth"])
