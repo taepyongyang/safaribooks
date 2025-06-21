@@ -1,7 +1,15 @@
 import requests
-import safaribooks
 
-from safaribooks_config import REGISTER_URL, CHECK_EMAIL, CHECK_PWD, USE_PROXY, PROXIES, CSRF_TOKEN_RE
+from safaribooks_config import (
+    CHECK_EMAIL,
+    CHECK_PWD,
+    CSRF_TOKEN_RE,
+    PROXIES,
+    REGISTER_URL,
+    USE_PROXY,
+)
+from safaribooks_process import SafariBooks
+
 
 class Register:
     def __init__(self, email, password, first_name, second_name, country="US", referrer="podcast"):
@@ -19,7 +27,7 @@ class Register:
             self.session.proxies = PROXIES
             self.session.verify = False
 
-        self.session.headers.update(safaribooks.SafariBooks.HEADERS)
+        self.session.headers.update(SafariBooks.HEADERS)
         self.session.headers.update({
             "X-Requested-With": "XMLHttpRequest",
             "Referer": REGISTER_URL
@@ -30,7 +38,7 @@ class Register:
     def handle_cookie_update(self, set_cookie_headers):
         for morsel in set_cookie_headers:
             # Handle Float 'max-age' Cookie
-            if safaribooks.SafariBooks.COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
+            if SafariBooks.COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
                 cookie_key, cookie_value = morsel.split(";")[0].split("=")
                 self.session.cookies.set(cookie_key, cookie_value)
 
