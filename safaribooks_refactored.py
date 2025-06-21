@@ -15,6 +15,7 @@ Usage:
 
 See README.md for details.
 """
+
 import re
 import os
 import sys
@@ -32,23 +33,15 @@ from lxml import html, etree
 from multiprocessing import Process, Queue, Value
 from urllib.parse import urljoin, urlparse, parse_qs, quote_plus
 
+# Import configuration constants
+from safaribooks_config import (
+    PATH, COOKIES_FILE, ORLY_BASE_HOST, SAFARI_BASE_HOST, API_ORIGIN_HOST,
+    ORLY_BASE_URL, SAFARI_BASE_URL, API_ORIGIN_URL, PROFILE_URL, USE_PROXY, PROXIES
+)
 
-PATH = os.path.dirname(os.path.realpath(__file__))
-COOKIES_FILE = os.path.join(PATH, "cookies.json")
 
-ORLY_BASE_HOST = "oreilly.com"  # PLEASE INSERT URL HERE
-
-SAFARI_BASE_HOST = "learning." + ORLY_BASE_HOST
-API_ORIGIN_HOST = "api." + ORLY_BASE_HOST
-
-ORLY_BASE_URL = "https://www." + ORLY_BASE_HOST
-SAFARI_BASE_URL = "https://" + SAFARI_BASE_HOST
-API_ORIGIN_URL = "https://" + API_ORIGIN_HOST
-PROFILE_URL = SAFARI_BASE_URL + "/profile/"
-
-# DEBUG
-USE_PROXY = False
-PROXIES = {"https": "https://127.0.0.1:8080"}
+## Configuration constants are now imported from safari_config.py
+## The constants have been removed from this file.
 
 
 class Display:
