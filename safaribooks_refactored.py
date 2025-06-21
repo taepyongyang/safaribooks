@@ -16,38 +16,15 @@ Usage:
 See README.md for details.
 """
 
-import re
-import os
-import sys
-import json
-import shutil
-import pathlib
-import getpass
-import logging
 import argparse
-import requests
-import traceback
-from html import escape
-from random import random
-from lxml import html, etree
-from multiprocessing import Process, Queue, Value
-from urllib.parse import urljoin, urlparse, parse_qs, quote_plus
+import getpass
+import sys
 
 # Import configuration constants
-from safaribooks_config import (
-    PATH, COOKIES_FILE, ORLY_BASE_HOST, SAFARI_BASE_HOST, API_ORIGIN_HOST,
-    ORLY_BASE_URL, SAFARI_BASE_URL, API_ORIGIN_URL, PROFILE_URL, USE_PROXY, PROXIES
-)
-
-# Import WinQueue workaround for Windows
-from safaribooks_winqueue import WinQueue
-
-# Import Display from new module
-from safaribooks_display import Display
-
+from safaribooks_config import SAFARI_BASE_URL
 from safaribooks_process import SafariBooks
 
-# ...existing code...
+# MAIN
 if __name__ == "__main__":
     arguments = argparse.ArgumentParser(prog="safaribooks.py",
                                         description="Download and generate an EPUB of your favorite books"
