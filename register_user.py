@@ -1,17 +1,7 @@
-import re
 import requests
 import safaribooks
 
-REGISTER_URL = safaribooks.SAFARI_BASE_URL + "/register/"
-CHECK_EMAIL = safaribooks.SAFARI_BASE_URL + "/check-email-availability/"
-CHECK_PWD = safaribooks.SAFARI_BASE_URL + "/check-password/"
-
-# DEBUG
-USE_PROXY = False
-PROXIES = {"https": "https://127.0.0.1:8080"}
-
-CSRF_TOKEN_RE = re.compile(r"(?<=name='csrfmiddlewaretoken' value=')([^']+)")
-
+from safaribooks_config import REGISTER_URL, CHECK_EMAIL, CHECK_PWD, USE_PROXY, PROXIES, CSRF_TOKEN_RE
 
 class Register:
     def __init__(self, email, password, first_name, second_name, country="US", referrer="podcast"):
