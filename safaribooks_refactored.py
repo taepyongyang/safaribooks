@@ -54,6 +54,10 @@ if __name__ == "__main__":
         "--preserve-log", dest="log", action='store_true',
         help="Leave the `info_XXXXXXXXXXXXX.log` file even if there isn't any error."
     )
+    parser.add_argument(
+        "--debug", dest="debug", action='store_true',
+        help="Enable diagnostic mode: track download completeness, validate EPUB integrity, and generate diagnostic report."
+    )
     parser.add_argument("--help", action="help", default=argparse.SUPPRESS, help='Show this help message.')
     parser.add_argument(
         "bookid", metavar='<BOOK ID>',
