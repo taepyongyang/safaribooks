@@ -83,6 +83,7 @@ class DiagnosticCollector:
         self.stages: Dict[str, StageMetrics] = {
             "chapters": StageMetrics(),
             "css": StageMetrics(),
+            "css_assets": StageMetrics(),  # Fonts and images referenced in CSS
             "images": StageMetrics(),
             "epub_files": StageMetrics(),
         }

@@ -4,6 +4,7 @@ import pathlib
 import re
 import shutil
 import sys
+import tempfile
 from html import escape
 from multiprocessing import Process
 from queue import Queue
@@ -14,12 +15,15 @@ import requests
 from lxml import etree, html
 
 from safaribooks_config import (
+    API_ORIGIN_HOST,
     API_ORIGIN_URL,
     COOKIES_FILE,
+    ORLY_BASE_HOST,
     ORLY_BASE_URL,
     PATH,
     PROFILE_URL,
     PROXIES,
+    SAFARI_BASE_HOST,
     SAFARI_BASE_URL,
     USE_PROXY,
 )
@@ -118,15 +122,24 @@ class SafariBooks:
 
     COOKIE_FLOAT_MAX_AGE_PATTERN = re.compile(r'(max-age=\d*\.\d*)', re.IGNORECASE)
 
+    # Valid book ID patterns: ISBN-10, ISBN-13, or O'Reilly internal IDs
+    BOOK_ID_PATTERN = re.compile(r'^[0-9]{10,13}$')
+
     def __init__(self, args):
         self.args = args
         self.display = Display("info_%s.log" % escape(args.bookid))
         self.display.intro()
 
+        # Security: Validate book ID format to prevent injection
+        self.book_id = args.bookid
+        if not self.BOOK_ID_PATTERN.match(self.book_id):
+            self.display.exit(f"Invalid book ID format: '{self.book_id}'\n"
+                              "    Book ID must be 10-13 digits (ISBN-10, ISBN-13, or O'Reilly ID).")
+
         # Initialize diagnostic collector (enabled with --debug flag)
         self.diagnostics = DiagnosticCollector(
             enabled=getattr(args, 'debug', False),
-            book_id=args.bookid
+            book_id=self.book_id
         )
 
         # Initialize filename mapping (populated by build_filename_mapping)
@@ -203,7 +216,8 @@ class SafariBooks:
         self.css_asset_paths = []  # Fonts and images referenced in CSS
 
         self.display.info("Downloading book contents... (%s chapters)" % len(self.book_chapters), state=True)
-        self.BASE_HTML = self.BASE_01_HTML + (self.KINDLE_HTML if not args.kindle else "") + self.BASE_02_HTML
+        # Include Kindle-friendly CSS rules WHEN --kindle flag is passed
+        self.BASE_HTML = self.BASE_01_HTML + (self.KINDLE_HTML if args.kindle else "") + self.BASE_02_HTML
 
         self.cover = False
         self.get()
@@ -959,71 +973,91 @@ class SafariBooks:
             self.display.state(len_books, len_books - len(self.chapters_queue))
 
     def _thread_download_css(self, url):
+        """Download a single CSS file with proper error handling."""
         css_file = os.path.join(self.css_path, "Style{0:0>2}.css".format(self.css.index(url)))
-        if os.path.isfile(css_file):
-            if not self.display.css_ad_info.value and url not in self.css[:self.css.index(url)]:
-                self.display.info(("File `%s` already exists.\n"
-                                   "    If you want to download again all the CSSs,\n"
-                                   "    please delete the output directory '" + self.BOOK_PATH + "'"
-                                   " and restart the program.") %
-                                  css_file)
-                self.display.css_ad_info.value = 1
-            # Record success for cached file
-            self.diagnostics.record_success("css", url, {"cached": True})
+        try:
+            if os.path.isfile(css_file):
+                if not self.display.css_ad_info.value and url not in self.css[:self.css.index(url)]:
+                    self.display.info(("File `%s` already exists.\n"
+                                       "    If you want to download again all the CSSs,\n"
+                                       "    please delete the output directory '" + self.BOOK_PATH + "'"
+                                       " and restart the program.") %
+                                      css_file)
+                    self.display.css_ad_info.value = 1
+                # Record success for cached file
+                self.diagnostics.record_success("css", url, {"cached": True})
 
-        else:
-            response = self.requests_provider(url)
-            if response == 0:
-                # Record failure with context
-                self.diagnostics.record_failure(
-                    "css", url, FailureCategory.NETWORK,
-                    error_message=f"Error retrieving CSS: {css_file}"
-                )
-                self.display.error("Error trying to retrieve this CSS: %s\n    From: %s" % (css_file, url))
-                return  # Exit without incrementing queue
+            else:
+                response = self.requests_provider(url)
+                if response == 0:
+                    # Record failure with context
+                    self.diagnostics.record_failure(
+                        "css", url, FailureCategory.NETWORK,
+                        error_message=f"Error retrieving CSS: {css_file}"
+                    )
+                    self.display.error("Error trying to retrieve this CSS: %s\n    From: %s" % (css_file, url))
+                    return  # Exit but finally block will update queue
 
-            with open(css_file, 'wb') as s:
-                s.write(response.content)
-            # Record success for downloaded file
-            self.diagnostics.record_success("css", url)
+                with open(css_file, 'wb') as s:
+                    s.write(response.content)
+                # Record success for downloaded file
+                self.diagnostics.record_success("css", url)
 
-        self.css_done_queue.put(1)
-        self.display.state(len(self.css), self.css_done_queue.qsize())
+        except Exception as e:
+            self.diagnostics.record_failure(
+                "css", url, FailureCategory.NETWORK,
+                error_message=f"Unexpected error downloading CSS: {e}"
+            )
+            self.display.error(f"Error downloading CSS {css_file}: {e}")
+        finally:
+            # Always update queue to prevent deadlocks
+            self.css_done_queue.put(1)
+            self.display.state(len(self.css), self.css_done_queue.qsize())
 
 
     def _thread_download_images(self, url):
+        """Download a single image file with proper error handling."""
         image_name = url.split("/")[-1]
         image_path = os.path.join(self.images_path, image_name)
-        if os.path.isfile(image_path):
-            if not self.display.images_ad_info.value and url not in self.images[:self.images.index(url)]:
-                self.display.info(("File `%s` already exists.\n"
-                                   "    If you want to download again all the images,\n"
-                                   "    please delete the output directory '" + self.BOOK_PATH + "'"
-                                   " and restart the program.") %
-                                  image_name)
-                self.display.images_ad_info.value = 1
-            # Record success for cached file
-            self.diagnostics.record_success("images", url, {"cached": True})
+        try:
+            if os.path.isfile(image_path):
+                if not self.display.images_ad_info.value and url not in self.images[:self.images.index(url)]:
+                    self.display.info(("File `%s` already exists.\n"
+                                       "    If you want to download again all the images,\n"
+                                       "    please delete the output directory '" + self.BOOK_PATH + "'"
+                                       " and restart the program.") %
+                                      image_name)
+                    self.display.images_ad_info.value = 1
+                # Record success for cached file
+                self.diagnostics.record_success("images", url, {"cached": True})
 
-        else:
-            response = self.requests_provider(urljoin(SAFARI_BASE_URL, url), stream=True)
-            if response == 0:
-                # Record failure with context
-                self.diagnostics.record_failure(
-                    "images", url, FailureCategory.NETWORK,
-                    error_message=f"Error retrieving image: {image_name}"
-                )
-                self.display.error("Error trying to retrieve this image: %s\n    From: %s" % (image_name, url))
-                return  # Exit without incrementing queue
+            else:
+                response = self.requests_provider(urljoin(SAFARI_BASE_URL, url), stream=True)
+                if response == 0:
+                    # Record failure with context
+                    self.diagnostics.record_failure(
+                        "images", url, FailureCategory.NETWORK,
+                        error_message=f"Error retrieving image: {image_name}"
+                    )
+                    self.display.error("Error trying to retrieve this image: %s\n    From: %s" % (image_name, url))
+                    return  # Exit but finally block will update queue
 
-            with open(image_path, 'wb') as img:
-                for chunk in response.iter_content(1024):
-                    img.write(chunk)
-            # Record success for downloaded file
-            self.diagnostics.record_success("images", url)
+                with open(image_path, 'wb') as img:
+                    for chunk in response.iter_content(1024):
+                        img.write(chunk)
+                # Record success for downloaded file
+                self.diagnostics.record_success("images", url)
 
-        self.images_done_queue.put(1)
-        self.display.state(len(self.images), self.images_done_queue.qsize())
+        except Exception as e:
+            self.diagnostics.record_failure(
+                "images", url, FailureCategory.NETWORK,
+                error_message=f"Unexpected error downloading image: {e}"
+            )
+            self.display.error(f"Error downloading image {image_name}: {e}")
+        finally:
+            # Always update queue to prevent deadlocks
+            self.images_done_queue.put(1)
+            self.display.state(len(self.images), self.images_done_queue.qsize())
 
     def _start_multiprocessing(self, operation, full_queue):
         if len(full_queue) > 5:
@@ -1052,18 +1086,20 @@ class SafariBooks:
         """
         Parse downloaded CSS files for url() references to fonts and images.
         Returns a dict mapping relative paths (e.g., 'fonts/DejaVu.ttf') to full URLs.
+
+        Security: Uses length-limited regex to prevent catastrophic backtracking.
         """
-        import re
         css_assets = {}
-        
+
         # Pattern to match url() references in CSS
         # Matches: url(path), url('path'), url("path")
-        url_pattern = re.compile(r'url\([\'"]?([^\'")\s]+)[\'"]?\)', re.IGNORECASE)
-        
+        # Security: Limit match length to 500 chars to prevent ReDoS attacks
+        url_pattern = re.compile(r'url\([\'"]?([^\'")\s]{1,500}?)[\'"]?\)', re.IGNORECASE)
+
         for css_file in os.listdir(self.css_path):
             if not css_file.endswith('.css'):
                 continue
-            
+
             css_file_path = os.path.join(self.css_path, css_file)
             try:
                 with open(css_file_path, 'r', encoding='utf-8') as f:
@@ -1071,103 +1107,186 @@ class SafariBooks:
             except Exception as e:
                 self.display.log(f"Error reading CSS file {css_file}: {e}")
                 continue
-            
+
             # Find all url() references
             matches = url_pattern.findall(css_content)
             for match in matches:
                 # Skip data URIs, absolute URLs, and already processed
                 if match.startswith('data:') or match.startswith('http://') or match.startswith('https://'):
                     continue
-                
+
                 # Clean up the path
                 asset_path = match.strip()
-                
+
                 # Skip CSS references (those are handled separately)
                 if asset_path.endswith('.css'):
                     continue
-                
+
                 # Track unique asset paths
                 if asset_path not in css_assets:
                     css_assets[asset_path] = asset_path
-        
+
         return css_assets
+
+    def _validate_asset_path(self, asset_path):
+        """
+        Validate asset path for security (prevent path traversal attacks).
+        Returns (is_safe, normalized_path) tuple.
+        """
+        # Normalize the path to resolve any '..' or '.' components
+        normalized_path = os.path.normpath(asset_path)
+
+        # Security: Block path traversal attempts
+        if normalized_path.startswith('..') or os.path.isabs(normalized_path):
+            self.display.log(f"Security: Rejected unsafe asset path: {asset_path}")
+            return False, None
+
+        # Security: Block paths with parent directory references
+        if '..' in normalized_path:
+            self.display.log(f"Security: Blocked path traversal attempt: {asset_path}")
+            return False, None
+
+        return True, normalized_path
+
+    def _validate_asset_url(self, asset_url):
+        """
+        Validate asset URL to ensure it stays within allowed O'Reilly domains.
+        Returns True if URL is safe, False otherwise.
+        """
+        try:
+            parsed_url = urlparse(asset_url)
+            allowed_hosts = [SAFARI_BASE_HOST, ORLY_BASE_HOST, API_ORIGIN_HOST]
+
+            # Check if hostname ends with any allowed host
+            if parsed_url.hostname:
+                for allowed in allowed_hosts:
+                    if parsed_url.hostname == allowed or parsed_url.hostname.endswith('.' + allowed):
+                        return True
+
+            self.display.log(f"Security: Blocked external URL: {asset_url}")
+            return False
+        except Exception as e:
+            self.display.log(f"Security: URL validation error: {e}")
+            return False
 
     def download_css_asset(self, asset_path, base_css_url):
         """
         Download a single CSS-referenced asset (font or image).
         asset_path: relative path like 'fonts/DejaVu.ttf' or 'icons/note.png'
         base_css_url: URL of a CSS file to derive the asset URL
+
+        Security: Validates paths and URLs to prevent path traversal and SSRF.
+        Uses atomic file writes to prevent corruption on failure.
         """
+        # Security: Validate asset path
+        is_safe, normalized_path = self._validate_asset_path(asset_path)
+        if not is_safe:
+            return False
+
         # Determine the target path in OEBPS/Styles/
-        target_path = os.path.join(self.css_path, asset_path)
+        target_path = os.path.join(self.css_path, normalized_path)
+
+        # Security: Double-check that target is within css_path
+        target_path = os.path.abspath(target_path)
+        css_path_abs = os.path.abspath(self.css_path)
+        if not target_path.startswith(css_path_abs):
+            self.display.log(f"Security: Path escape attempt blocked: {asset_path}")
+            return False
+
         target_dir = os.path.dirname(target_path)
-        
+
         # Create subdirectory if needed (e.g., Styles/fonts/)
         if target_dir and not os.path.isdir(target_dir):
             os.makedirs(target_dir, exist_ok=True)
-        
+
         # Skip if already exists
         if os.path.isfile(target_path):
             self.display.log(f"CSS asset already exists: {asset_path}")
             return True
-        
+
         # Construct the asset URL from the CSS URL base
-        # CSS URLs look like: https://learning.oreilly.com/api/v2/epubs/urn:orm:book:XXXX/files/some.css
-        # Assets are relative to CSS: https://learning.oreilly.com/api/v2/epubs/urn:orm:book:XXXX/files/fonts/x.ttf
-        
-        # Get the base URL for assets (directory containing CSS)
-        if base_css_url:
-            base_url = base_css_url.rsplit('/', 1)[0] + '/'
-            asset_url = urljoin(base_url, asset_path)
-        else:
+        if not base_css_url:
             self.display.log(f"No base URL for asset: {asset_path}")
             return False
-        
+
+        base_url = base_css_url.rsplit('/', 1)[0] + '/'
+        asset_url = urljoin(base_url, asset_path)
+
+        # Security: Validate the constructed URL
+        if not self._validate_asset_url(asset_url):
+            return False
+
         # Download the asset
         response = self.requests_provider(asset_url, stream=True)
         if response == 0:
             self.display.log(f"Failed to download CSS asset: {asset_path} from {asset_url}")
             return False
-        
+
+        # Atomic write: Write to temp file first, then rename on success
+        temp_file_path = None
         try:
-            with open(target_path, 'wb') as f:
+            # Create temp file in target directory for atomic rename
+            fd, temp_file_path = tempfile.mkstemp(dir=target_dir)
+            with os.fdopen(fd, 'wb') as f:
                 for chunk in response.iter_content(1024):
                     f.write(chunk)
+
+            # Atomic rename on success
+            shutil.move(temp_file_path, target_path)
+            temp_file_path = None  # Successfully moved, don't delete in finally
             self.display.log(f"Downloaded CSS asset: {asset_path}")
             return True
+
         except Exception as e:
             self.display.log(f"Error saving CSS asset {asset_path}: {e}")
             return False
 
+        finally:
+            # Clean up temp file on failure
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except Exception:
+                    pass
+
     def collect_css_assets(self):
         """
         Parse CSS files for url() references and download fonts/images.
+        Includes diagnostic tracking for completeness monitoring.
         """
         if not self.css:
             return
-        
+
         # Parse CSS files for asset references
         css_assets = self.parse_css_for_assets()
-        
+
         if not css_assets:
             self.display.log("No CSS assets found to download")
             return
-        
+
         self.display.info(f"Downloading CSS assets... ({len(css_assets)} files)", state=True)
-        
+
+        # Set expected count for diagnostic tracking
+        self.diagnostics.set_expected("css_assets", len(css_assets))
+
         # Use the first CSS URL as the base for constructing asset URLs
         base_css_url = self.css[0] if self.css else None
-        
+
         downloaded = 0
         failed = 0
         for asset_path in css_assets:
             if self.download_css_asset(asset_path, base_css_url):
                 downloaded += 1
+                self.diagnostics.record_success("css_assets", asset_path)
             else:
                 failed += 1
-        
+                self.diagnostics.record_failure(
+                    "css_assets", asset_path, FailureCategory.NETWORK,
+                    error_message=f"Failed to download CSS asset: {asset_path}"
+                )
+
         self.display.log(f"CSS assets: {downloaded} downloaded, {failed} failed")
-        
+
         # Store the asset paths for manifest generation
         self.css_asset_paths = list(css_assets.keys())
 
