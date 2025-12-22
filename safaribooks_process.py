@@ -25,6 +25,7 @@ from safaribooks_config import (
 )
 from safaribooks_display import Display
 from safaribooks_winqueue import WinQueue
+from safaribooks_diagnostics import DiagnosticCollector, FailureCategory
 
 
 class SafariBooks:
@@ -122,6 +123,16 @@ class SafariBooks:
         self.display = Display("info_%s.log" % escape(args.bookid))
         self.display.intro()
 
+        # Initialize diagnostic collector (enabled with --debug flag)
+        self.diagnostics = DiagnosticCollector(
+            enabled=getattr(args, 'debug', False),
+            book_id=args.bookid
+        )
+
+        # Initialize filename mapping (populated by build_filename_mapping)
+        self.filename_mapping = {}
+        self.content_url_to_filename = {}
+
         self.session = requests.Session()
         if USE_PROXY:  # DEBUG
             self.session.proxies = PROXIES
@@ -154,7 +165,8 @@ class SafariBooks:
         self.display.book_info(self.book_info)
 
         self.display.info("Retrieving book chapters...")
-        self.book_chapters = self.get_book_chapters()
+        self.book_chapters = self.fix_duplicate_filenames(self.get_book_chapters())
+        self.build_filename_mapping()
 
         self.chapters_queue = self.book_chapters[:]
 
@@ -163,6 +175,12 @@ class SafariBooks:
 
         self.book_title = self.book_info["title"]
         self.base_url = self.book_info["web_url"]
+
+        # Generate EPUB filename from title and author
+        self.epub_filename = self.generate_epub_filename(
+            self.book_title,
+            self.book_info.get("authors", [])
+        )
 
         self.clean_book_title = "".join(self.escape_dirname(self.book_title).split(",")[:2]) \
                                 + " ({0})".format(self.book_id)
@@ -182,6 +200,7 @@ class SafariBooks:
         self.chapter_stylesheets = []
         self.css = []
         self.images = []
+        self.css_asset_paths = []  # Fonts and images referenced in CSS
 
         self.display.info("Downloading book contents... (%s chapters)" % len(self.book_chapters), state=True)
         self.BASE_HTML = self.BASE_01_HTML + (self.KINDLE_HTML if not args.kindle else "") + self.BASE_02_HTML
@@ -205,6 +224,7 @@ class SafariBooks:
         self.css_done_queue = Queue(0) if "win" not in sys.platform else WinQueue()
         self.display.info("Downloading book CSSs... (%s files)" % len(self.css), state=True)
         self.collect_css()
+        self.collect_css_assets()  # Download fonts/images referenced in CSS
         self.images_done_queue = Queue(0) if "win" not in sys.platform else WinQueue()
         self.display.info("Downloading book images... (%s files)" % len(self.images), state=True)
         self.collect_images()
@@ -215,7 +235,15 @@ class SafariBooks:
         if not args.no_cookies:
             json.dump(self.session.cookies.get_dict(), open(COOKIES_FILE, "w"))
 
-        self.display.done(os.path.join(self.BOOK_PATH, self.book_id + ".epub"))
+        # Diagnostic finalization (only when --debug enabled)
+        if self.diagnostics.enabled:
+            epub_path = os.path.join(self.BOOK_PATH, self.epub_filename)
+            self.diagnostics.validate_epub(epub_path)
+            report_path = os.path.join(self.BOOK_PATH, f"diagnostic_report_{self.book_id}.json")
+            self.diagnostics.save_report(report_path)
+            self.display.out(self.diagnostics.print_summary())
+
+        self.display.done(os.path.join(self.BOOK_PATH, self.epub_filename))
         self.display.unregister()
 
         if not self.display.in_error and not args.log:
@@ -356,17 +384,37 @@ class SafariBooks:
         return response
 
     def get_book_chapters(self, page=1):
-        response = self.requests_provider(urljoin(self.api_url, "chapter/?page=%s" % page))
+        self.diagnostics.track_pagination(page, success=True)
+        chapter_url = urljoin(self.api_url, "chapter/?page=%s" % page)
+        response = self.requests_provider(chapter_url)
         if response == 0:
+            self.diagnostics.track_pagination(page, success=False, error="API request failed")
+            self.diagnostics.record_failure(
+                "chapters", chapter_url, FailureCategory.NETWORK,
+                error_message="Unable to retrieve book chapters"
+            )
             self.display.exit("API: unable to retrieve book chapters.")
 
         response = response.json()
 
         if not isinstance(response, dict) or len(response.keys()) == 1:
+            self.diagnostics.record_failure(
+                "chapters", chapter_url, FailureCategory.VALIDATION,
+                error_message="Invalid API response format",
+                content_sample=str(response)[:500]
+            )
             self.display.exit(self.display.api_error(response))
 
         if "results" not in response or not len(response["results"]):
+            self.diagnostics.record_failure(
+                "chapters", chapter_url, FailureCategory.MISSING_CONTENT,
+                error_message="No chapter results in API response"
+            )
             self.display.exit("API: unable to retrieve book chapters.")
+
+        # Set expected chapter count on first page
+        if page == 1:
+            self.diagnostics.set_expected("chapters", response["count"])
 
         if response["count"] > sys.getrecursionlimit():
             sys.setrecursionlimit(response["count"])
@@ -413,6 +461,123 @@ class SafariBooks:
 
         return root
 
+
+    @staticmethod
+    def fix_duplicate_filenames(chapters):
+        """
+        Fix duplicate filenames by deriving unique names from content URLs.
+        
+        The O'Reilly API sometimes returns 'index.xhtml' for all chapters,
+        causing them to overwrite each other. This method extracts unique
+        identifiers from the content URL path.
+        
+        Example: .../html/ch1/index.xhtml -> ch1_index.xhtml
+        """
+        from collections import Counter
+        
+        # Count filename occurrences
+        filename_counts = Counter(c.get("filename", "") for c in chapters)
+        
+        # Find duplicates (filename appears more than once)
+        duplicates = {f for f, count in filename_counts.items() if count > 1}
+        
+        if not duplicates:
+            return chapters  # No duplicates, return as-is
+        
+        # Fix duplicate filenames
+        for chapter in chapters:
+            filename = chapter.get("filename", "")
+            if filename in duplicates:
+                content_url = chapter.get("content", "")
+                # Extract path components from URL
+                # e.g., ".../files/html/ch1/index.xhtml" -> ["html", "ch1", "index.xhtml"]
+                if "/files/" in content_url:
+                    path_part = content_url.split("/files/")[-1]
+                    path_components = [p for p in path_part.split("/") if p]
+                    
+                    if len(path_components) >= 2:
+                        # Use parent directory as prefix: ch1_index.xhtml
+                        parent_dir = path_components[-2]
+                        base_name = path_components[-1]
+                        # Ensure .xhtml extension
+                        if not base_name.endswith(".xhtml"):
+                            base_name = base_name.replace(".html", ".xhtml")
+                            if not base_name.endswith(".xhtml"):
+                                base_name += ".xhtml"
+                        new_filename = f"{parent_dir}_{base_name}"
+                        # Clean up double extensions
+                        new_filename = new_filename.replace(".xhtml.xhtml", ".xhtml")
+                        chapter["filename"] = new_filename
+        
+        return chapters
+
+
+    def build_filename_mapping(self):
+        """
+        Build a mapping from various possible link patterns to actual chapter filenames.
+        
+        This enables link_replace to correctly rewrite chapter-to-chapter links
+        when filenames have been made unique (e.g., index.xhtml -> ch1_index.xhtml).
+        
+        Maps patterns like:
+        - 'index.xhtml' -> 'ch1_index.xhtml'
+        - 'html/ch1/index.xhtml' -> 'ch1_index.xhtml'  
+        - 'ch1/index.xhtml' -> 'ch1_index.xhtml'
+        - 'index.xhtml#anchor' -> 'ch1_index.xhtml#anchor' (handled via base lookup)
+        """
+        self.filename_mapping = {}
+        self.content_url_to_filename = {}
+        
+        for chapter in self.book_chapters:
+            actual_filename = chapter.get("filename", "")
+            content_url = chapter.get("content", "")
+            
+            # Ensure xhtml extension
+            if actual_filename.endswith(".html"):
+                actual_filename = actual_filename.replace(".html", ".xhtml")
+            
+            # Map content URL to filename (for TOC lookup)
+            if content_url:
+                self.content_url_to_filename[content_url] = actual_filename
+            
+            # Extract path part from content URL
+            if "/files/" in content_url:
+                path_part = content_url.split("/files/")[-1]
+                path_components = [p for p in path_part.split("/") if p]
+                
+                # Map full path (html/ch1/index.xhtml)
+                if path_components:
+                    full_path = "/".join(path_components)
+                    self.filename_mapping[full_path] = actual_filename
+                    self.filename_mapping[full_path.replace(".html", ".xhtml")] = actual_filename
+                    
+                # Map without first directory (ch1/index.xhtml)
+                if len(path_components) >= 2:
+                    partial_path = "/".join(path_components[1:])
+                    self.filename_mapping[partial_path] = actual_filename
+                    self.filename_mapping[partial_path.replace(".html", ".xhtml")] = actual_filename
+                    
+                # Map just the directory/filename combo (ch1/index.xhtml from end)
+                if len(path_components) >= 2:
+                    dir_file = path_components[-2] + "/" + path_components[-1]
+                    self.filename_mapping[dir_file] = actual_filename
+                    self.filename_mapping[dir_file.replace(".html", ".xhtml")] = actual_filename
+                    
+                # Map just the base filename (index.xhtml) - but only if unique
+                # This is a fallback; specific paths should take precedence
+                base_name = path_components[-1] if path_components else ""
+                if base_name and base_name not in self.filename_mapping:
+                    self.filename_mapping[base_name] = actual_filename
+                    self.filename_mapping[base_name.replace(".html", ".xhtml")] = actual_filename
+            
+            # Also map the original API filename if different
+            original_filename = chapter.get("original_filename", "")
+            if original_filename and original_filename != actual_filename:
+                self.filename_mapping[original_filename] = actual_filename
+                self.filename_mapping[original_filename.replace(".html", ".xhtml")] = actual_filename
+        
+        self.display.log(f"Built filename mapping with {len(self.filename_mapping)} entries")
+
     @staticmethod
     def url_is_absolute(url):
         return bool(urlparse(url).netloc)
@@ -427,8 +592,55 @@ class SafariBooks:
                 if any(x in link for x in ["cover", "images", "graphics"]) or \
                         self.is_image_link(link):
                     image = link.split("/")[-1]
+                    # Track detected image for cross-reference validation
+                    self.diagnostics.track_detected_asset("images", image)
+                    
+                    # Add to download queue if not already present
+                    # Construct full URL using current chapter's asset base
+                    if hasattr(self, 'current_asset_base_url'):
+                        if self.current_api_v2_detected:
+                            full_url = self.current_asset_base_url + '/' + link.lstrip('/')
+                        else:
+                            full_url = urljoin(self.current_asset_base_url, link)
+                        
+                        # Avoid duplicates
+                        if full_url not in self.images and image not in [u.split('/')[-1] for u in self.images]:
+                            self.images.append(full_url)
+                            self.display.log("Crawler: found additional image: %s" % image)
+                    
                     return "Images/" + image
 
+                # Handle chapter-to-chapter links using filename mapping
+                # Separate any anchor from the path
+                anchor = ""
+                link_path = link
+                if "#" in link:
+                    link_path, anchor = link.split("#", 1)
+                    anchor = "#" + anchor
+                
+                # Normalize the path for lookup
+                link_path = link_path.replace(".html", ".xhtml")
+                
+                # Try to find in filename mapping
+                if hasattr(self, 'filename_mapping'):
+                    # Try the full path first
+                    if link_path in self.filename_mapping:
+                        return self.filename_mapping[link_path] + anchor
+                    
+                    # Try without leading ../
+                    clean_path = link_path.lstrip("./")
+                    while clean_path.startswith("../"):
+                        clean_path = clean_path[3:]
+                    
+                    if clean_path in self.filename_mapping:
+                        return self.filename_mapping[clean_path] + anchor
+                    
+                    # Try just the filename part
+                    basename = link_path.split("/")[-1]
+                    if basename in self.filename_mapping:
+                        return self.filename_mapping[basename] + anchor
+                
+                # Fallback: simple extension replacement
                 return link.replace(".html", ".xhtml")
 
             else:
@@ -463,10 +675,22 @@ class SafariBooks:
     def parse_html(self, root, first_page=False):
         if random() > 0.8:
             if len(root.xpath("//div[@class='controls']/a/text()")):
+                self.diagnostics.record_failure(
+                    "chapters", self.filename, FailureCategory.VALIDATION,
+                    error_message="Rate limit or paywall detected (controls div found)"
+                )
                 self.display.exit(self.display.api_error(" "))
 
         book_content = root.xpath("//div[@id='sbo-rt-content']")
         if not len(book_content):
+            # Log HTML sample for debugging missing content
+            html_sample = html.tostring(root, encoding='unicode')[:1000] if root is not None else "None"
+            self.diagnostics.record_failure(
+                "chapters", self.filename, FailureCategory.MISSING_CONTENT,
+                error_message="Book content div (sbo-rt-content) not found",
+                content_sample=html_sample,
+                context={"chapter_title": self.chapter_title}
+            )
             self.display.exit(
                 "Parser: book content's corrupted or not present: %s (%s)" %
                 (self.filename, self.chapter_title)
@@ -477,6 +701,7 @@ class SafariBooks:
             for chapter_css_url in self.chapter_stylesheets:
                 if chapter_css_url not in self.css:
                     self.css.append(chapter_css_url)
+                    self.diagnostics.track_detected_asset("css", chapter_css_url)
                     self.display.log("Crawler: found a new CSS at %s" % chapter_css_url)
 
                 page_css += "<link href=\"Styles/Style{0:0>2}.css\" " \
@@ -490,6 +715,7 @@ class SafariBooks:
 
                 if css_url not in self.css:
                     self.css.append(css_url)
+                    self.diagnostics.track_detected_asset("css", css_url)
                     self.display.log("Crawler: found a new CSS at %s" % css_url)
 
                 page_css += "<link href=\"Styles/Style{0:0>2}.css\" " \
@@ -522,11 +748,18 @@ class SafariBooks:
                 image_attr_href = [x for x in img.attrib.keys() if "href" in x]
                 if len(image_attr_href):
                     svg_url = img.attrib.get(image_attr_href[0])
+                    # Track SVG image conversion for diagnostics
+                    self.diagnostics.track_detected_asset("images", svg_url.split("/")[-1] if "/" in svg_url else svg_url)
                     svg_root = img.getparent().getparent()
                     new_img = svg_root.makeelement("img")
                     new_img.attrib.update({"src": svg_url})
                     svg_root.remove(img.getparent())
                     svg_root.append(new_img)
+                else:
+                    # SVG image without href - track as skipped
+                    self.diagnostics.record_skipped(
+                        "images", "unknown_svg", "SVG image element without href attribute"
+                    )
 
         book_content = book_content[0]
         book_content.rewrite_links(self.link_replace)
@@ -576,6 +809,60 @@ class SafariBooks:
 
         return dirname if not clean_space else dirname.replace(" ", "")
 
+
+    @staticmethod
+    def generate_epub_filename(title, authors, max_length=200):
+        """
+        Generate a safe EPUB filename from title and author(s).
+        
+        Format: <title>_<author>.epub
+        
+        Args:
+            title: Book title string
+            authors: List of author dicts with 'name' key, or string
+            max_length: Maximum filename length (default 200, safe for most filesystems)
+        
+        Returns:
+            Safe filename string like "Core Java for the Impatient_Cay S. Horstmann.epub"
+        """
+        # Get first author name
+        if isinstance(authors, list) and authors:
+            author_name = authors[0].get("name", "Unknown") if isinstance(authors[0], dict) else str(authors[0])
+        elif isinstance(authors, str):
+            author_name = authors
+        else:
+            author_name = "Unknown"
+        
+        # Clean title and author - remove/replace unsafe characters
+        # Allowed: letters, numbers, spaces, hyphens, underscores, periods, commas, parentheses
+        unsafe_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0', '\n', '\r', '\t']
+        
+        clean_title = title
+        clean_author = author_name
+        
+        for ch in unsafe_chars:
+            clean_title = clean_title.replace(ch, '_')
+            clean_author = clean_author.replace(ch, '_')
+        
+        # Additional cleanup
+        # Remove leading/trailing spaces and dots (Windows doesn't like trailing dots)
+        clean_title = clean_title.strip(' .')
+        clean_author = clean_author.strip(' .')
+        
+        # Replace multiple consecutive underscores/spaces with single
+        import re
+        clean_title = re.sub(r'[_\s]+', ' ', clean_title).strip()
+        clean_author = re.sub(r'[_\s]+', ' ', clean_author).strip()
+        
+        # Create filename
+        base_filename = f"{clean_title}_{clean_author}"
+        
+        # Truncate if needed (leave room for .epub extension)
+        if len(base_filename) > max_length - 5:
+            base_filename = base_filename[:max_length - 5].strip(' ._')
+        
+        return base_filename + ".epub"
+
     def create_dirs(self):
         if os.path.isdir(self.BOOK_PATH):
             self.display.log("Book directory already exists: %s" % self.BOOK_PATH)
@@ -620,6 +907,8 @@ class SafariBooks:
             first_page = len_books == len(self.chapters_queue)
 
             next_chapter = self.chapters_queue.pop(0)
+            # Track raw chapter metadata for debugging
+            self.diagnostics.track_chapter_metadata(next_chapter)
             self.chapter_title = next_chapter["title"]
             self.filename = next_chapter["filename"]
 
@@ -628,6 +917,10 @@ class SafariBooks:
             if 'v2' in next_chapter['content']:
                 asset_base_url = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{}/files".format(self.book_id)
                 api_v2_detected = True
+
+            # Store for use by link_replace() during HTML parsing
+            self.current_asset_base_url = asset_base_url
+            self.current_api_v2_detected = api_v2_detected
 
             if "images" in next_chapter and len(next_chapter["images"]):
                 for img_url in next_chapter['images']:
@@ -655,9 +948,13 @@ class SafariBooks:
                          % self.filename.replace(".html", ".xhtml")
                     )
                     self.display.book_ad_info = True
+                # Record success for cached chapter
+                self.diagnostics.record_success("chapters", self.filename, {"cached": True})
 
             else:
                 self.save_page_html(self.parse_html(self.get_html(next_chapter["content"]), first_page))
+                # Record success for downloaded chapter
+                self.diagnostics.record_success("chapters", self.filename, {"cached": False})
 
             self.display.state(len_books, len_books - len(self.chapters_queue))
 
@@ -671,15 +968,24 @@ class SafariBooks:
                                    " and restart the program.") %
                                   css_file)
                 self.display.css_ad_info.value = 1
+            # Record success for cached file
+            self.diagnostics.record_success("css", url, {"cached": True})
 
         else:
             response = self.requests_provider(url)
             if response == 0:
+                # Record failure with context
+                self.diagnostics.record_failure(
+                    "css", url, FailureCategory.NETWORK,
+                    error_message=f"Error retrieving CSS: {css_file}"
+                )
                 self.display.error("Error trying to retrieve this CSS: %s\n    From: %s" % (css_file, url))
-                return
+                return  # Exit without incrementing queue
 
             with open(css_file, 'wb') as s:
                 s.write(response.content)
+            # Record success for downloaded file
+            self.diagnostics.record_success("css", url)
 
         self.css_done_queue.put(1)
         self.display.state(len(self.css), self.css_done_queue.qsize())
@@ -696,16 +1002,25 @@ class SafariBooks:
                                    " and restart the program.") %
                                   image_name)
                 self.display.images_ad_info.value = 1
+            # Record success for cached file
+            self.diagnostics.record_success("images", url, {"cached": True})
 
         else:
             response = self.requests_provider(urljoin(SAFARI_BASE_URL, url), stream=True)
             if response == 0:
+                # Record failure with context
+                self.diagnostics.record_failure(
+                    "images", url, FailureCategory.NETWORK,
+                    error_message=f"Error retrieving image: {image_name}"
+                )
                 self.display.error("Error trying to retrieve this image: %s\n    From: %s" % (image_name, url))
-                return
+                return  # Exit without incrementing queue
 
             with open(image_path, 'wb') as img:
                 for chunk in response.iter_content(1024):
                     img.write(chunk)
+            # Record success for downloaded file
+            self.diagnostics.record_success("images", url)
 
         self.images_done_queue.put(1)
         self.display.state(len(self.images), self.images_done_queue.qsize())
@@ -726,9 +1041,135 @@ class SafariBooks:
     def collect_css(self):
         self.display.state_status.value = -1
 
+        # Set expected CSS count for diagnostics
+        self.diagnostics.set_expected("css", len(self.css))
+
         # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
         for css_url in self.css:
             self._thread_download_css(css_url)
+
+    def parse_css_for_assets(self):
+        """
+        Parse downloaded CSS files for url() references to fonts and images.
+        Returns a dict mapping relative paths (e.g., 'fonts/DejaVu.ttf') to full URLs.
+        """
+        import re
+        css_assets = {}
+        
+        # Pattern to match url() references in CSS
+        # Matches: url(path), url('path'), url("path")
+        url_pattern = re.compile(r'url\([\'"]?([^\'")\s]+)[\'"]?\)', re.IGNORECASE)
+        
+        for css_file in os.listdir(self.css_path):
+            if not css_file.endswith('.css'):
+                continue
+            
+            css_file_path = os.path.join(self.css_path, css_file)
+            try:
+                with open(css_file_path, 'r', encoding='utf-8') as f:
+                    css_content = f.read()
+            except Exception as e:
+                self.display.log(f"Error reading CSS file {css_file}: {e}")
+                continue
+            
+            # Find all url() references
+            matches = url_pattern.findall(css_content)
+            for match in matches:
+                # Skip data URIs, absolute URLs, and already processed
+                if match.startswith('data:') or match.startswith('http://') or match.startswith('https://'):
+                    continue
+                
+                # Clean up the path
+                asset_path = match.strip()
+                
+                # Skip CSS references (those are handled separately)
+                if asset_path.endswith('.css'):
+                    continue
+                
+                # Track unique asset paths
+                if asset_path not in css_assets:
+                    css_assets[asset_path] = asset_path
+        
+        return css_assets
+
+    def download_css_asset(self, asset_path, base_css_url):
+        """
+        Download a single CSS-referenced asset (font or image).
+        asset_path: relative path like 'fonts/DejaVu.ttf' or 'icons/note.png'
+        base_css_url: URL of a CSS file to derive the asset URL
+        """
+        # Determine the target path in OEBPS/Styles/
+        target_path = os.path.join(self.css_path, asset_path)
+        target_dir = os.path.dirname(target_path)
+        
+        # Create subdirectory if needed (e.g., Styles/fonts/)
+        if target_dir and not os.path.isdir(target_dir):
+            os.makedirs(target_dir, exist_ok=True)
+        
+        # Skip if already exists
+        if os.path.isfile(target_path):
+            self.display.log(f"CSS asset already exists: {asset_path}")
+            return True
+        
+        # Construct the asset URL from the CSS URL base
+        # CSS URLs look like: https://learning.oreilly.com/api/v2/epubs/urn:orm:book:XXXX/files/some.css
+        # Assets are relative to CSS: https://learning.oreilly.com/api/v2/epubs/urn:orm:book:XXXX/files/fonts/x.ttf
+        
+        # Get the base URL for assets (directory containing CSS)
+        if base_css_url:
+            base_url = base_css_url.rsplit('/', 1)[0] + '/'
+            asset_url = urljoin(base_url, asset_path)
+        else:
+            self.display.log(f"No base URL for asset: {asset_path}")
+            return False
+        
+        # Download the asset
+        response = self.requests_provider(asset_url, stream=True)
+        if response == 0:
+            self.display.log(f"Failed to download CSS asset: {asset_path} from {asset_url}")
+            return False
+        
+        try:
+            with open(target_path, 'wb') as f:
+                for chunk in response.iter_content(1024):
+                    f.write(chunk)
+            self.display.log(f"Downloaded CSS asset: {asset_path}")
+            return True
+        except Exception as e:
+            self.display.log(f"Error saving CSS asset {asset_path}: {e}")
+            return False
+
+    def collect_css_assets(self):
+        """
+        Parse CSS files for url() references and download fonts/images.
+        """
+        if not self.css:
+            return
+        
+        # Parse CSS files for asset references
+        css_assets = self.parse_css_for_assets()
+        
+        if not css_assets:
+            self.display.log("No CSS assets found to download")
+            return
+        
+        self.display.info(f"Downloading CSS assets... ({len(css_assets)} files)", state=True)
+        
+        # Use the first CSS URL as the base for constructing asset URLs
+        base_css_url = self.css[0] if self.css else None
+        
+        downloaded = 0
+        failed = 0
+        for asset_path in css_assets:
+            if self.download_css_asset(asset_path, base_css_url):
+                downloaded += 1
+            else:
+                failed += 1
+        
+        self.display.log(f"CSS assets: {downloaded} downloaded, {failed} failed")
+        
+        # Store the asset paths for manifest generation
+        self.css_asset_paths = list(css_assets.keys())
 
     def collect_images(self):
         if self.display.book_ad_info == 2:
@@ -739,12 +1180,16 @@ class SafariBooks:
 
         self.display.state_status.value = -1
 
+        # Set expected image count for diagnostics
+        self.diagnostics.set_expected("images", len(self.images))
+
         # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
         for image_url in self.images:
             self._thread_download_images(image_url)
 
     def create_content_opf(self):
-        self.css = next(os.walk(self.css_path))[2]
+        # Filter to only include .css files (not fonts/images in Styles directory)
+        self.css = [f for f in next(os.walk(self.css_path))[2] if f.endswith('.css')]
         self.images = next(os.walk(self.images_path))[2]
 
         manifest = []
@@ -769,6 +1214,43 @@ class SafariBooks:
             manifest.append("<item id=\"style_{0:0>2}\" href=\"Styles/Style{0:0>2}.css\" "
                             "media-type=\"text/css\" />".format(i))
 
+        # Add CSS-referenced assets (fonts and icons) to manifest
+        for asset_path in getattr(self, 'css_asset_paths', []):
+            # Check if the file actually exists
+            full_path = os.path.join(self.css_path, asset_path)
+            if not os.path.isfile(full_path):
+                continue
+
+            # Generate unique ID from path
+            safe_id = escape(asset_path.replace('/', '_').replace('.', '_'))
+
+            # Determine media type based on extension
+            ext = asset_path.split('.')[-1].lower()
+            if ext == 'ttf':
+                media_type = 'font/ttf'
+            elif ext == 'otf':
+                media_type = 'font/otf'
+            elif ext == 'woff':
+                media_type = 'font/woff'
+            elif ext == 'woff2':
+                media_type = 'font/woff2'
+            elif ext == 'eot':
+                media_type = 'application/vnd.ms-fontobject'
+            elif ext == 'png':
+                media_type = 'image/png'
+            elif ext in ('jpg', 'jpeg'):
+                media_type = 'image/jpeg'
+            elif ext == 'gif':
+                media_type = 'image/gif'
+            elif ext == 'svg':
+                media_type = 'image/svg+xml'
+            else:
+                media_type = 'application/octet-stream'
+
+            manifest.append("<item id=\"{0}\" href=\"Styles/{1}\" media-type=\"{2}\" />".format(
+                safe_id, asset_path, media_type
+            ))
+
         authors = "\n".join("<dc:creator opf:file-as=\"{0}\" opf:role=\"aut\">{0}</dc:creator>".format(
             escape(aut.get("name", "n/d"))
         ) for aut in self.book_info.get("authors", []))
@@ -792,22 +1274,49 @@ class SafariBooks:
         )
 
     @staticmethod
-    def parse_toc(toc_list, c=0, mx=0):
+    def parse_toc(toc_list, filename_mapping=None, c=0, mx=0):
         r = ""
         for cc in toc_list:
             c += 1
             if int(cc["depth"]) > mx:
                 mx = int(cc["depth"])
 
+            # Get the href and any anchor
+            href = cc["href"].replace(".html", ".xhtml")
+            anchor = ""
+            if "#" in href:
+                href_path, anchor = href.split("#", 1)
+                anchor = "#" + anchor
+            else:
+                href_path = href
+            
+            # Try to resolve the filename using the mapping
+            resolved_filename = href_path.split("/")[-1]  # Default fallback
+            
+            if filename_mapping:
+                # Try various path patterns
+                for pattern in [href_path, href_path.lstrip("./"), href_path.split("/")[-1]]:
+                    # Also try without leading ../
+                    clean_pattern = pattern
+                    while clean_pattern.startswith("../"):
+                        clean_pattern = clean_pattern[3:]
+                    
+                    if pattern in filename_mapping:
+                        resolved_filename = filename_mapping[pattern]
+                        break
+                    elif clean_pattern in filename_mapping:
+                        resolved_filename = filename_mapping[clean_pattern]
+                        break
+            
             r += "<navPoint id=\"{0}\" playOrder=\"{1}\">" \
                  "<navLabel><text>{2}</text></navLabel>" \
                  "<content src=\"{3}\"/>".format(
                     cc["fragment"] if len(cc["fragment"]) else cc["id"], c,
-                    escape(cc["label"]), cc["href"].replace(".html", ".xhtml").split("/")[-1]
+                    escape(cc["label"]), resolved_filename + anchor
                  )
 
             if cc["children"]:
-                sr, c, mx = SafariBooks.parse_toc(cc["children"], c, mx)
+                sr, c, mx = SafariBooks.parse_toc(cc["children"], filename_mapping, c, mx)
                 r += sr
 
             r += "</navPoint>\n"
@@ -830,7 +1339,7 @@ class SafariBooks:
                 " in order to complete the `.epub` creation!"
             )
 
-        navmap, _, max_depth = self.parse_toc(response)
+        navmap, _, max_depth = self.parse_toc(response, self.filename_mapping)
         return self.TOC_NCX.format(
             (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
             max_depth,
@@ -863,4 +1372,4 @@ class SafariBooks:
             os.remove(zip_file + ".zip")
 
         shutil.make_archive(zip_file, 'zip', self.BOOK_PATH)
-        os.rename(zip_file + ".zip", os.path.join(self.BOOK_PATH, self.book_id) + ".epub")
+        os.rename(zip_file + ".zip", os.path.join(self.BOOK_PATH, self.epub_filename))
