@@ -10,6 +10,8 @@ Thanks: @elrob, @noxymon
 """
 
 import json
+import os
+import stat
 import safaribooks
 
 
@@ -20,7 +22,9 @@ def transform(cookies_string):
         cookies[key] = value
 
     print(cookies)
-    json.dump(cookies, open(safaribooks.COOKIES_FILE, 'w'))
+    with open(safaribooks.COOKIES_FILE, 'w') as f:
+        json.dump(cookies, f)
+    os.chmod(safaribooks.COOKIES_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600 - owner read/write only
     print("\n\nDone! Cookie Jar saved into `cookies.json`. "
           "Now you can run `safaribooks.py` without the `--cred` argument...")
 

@@ -6,6 +6,7 @@ name = "pypi"
 
 [packages]
 urllib3 = ">=1.26.5"
+websocket-client = ">=1.0.0"
 
 lxml = "*"
 requests = "*"
@@ -15,4 +16,4 @@ requests = "*"
 
 [requires]
 
-python_version = "3.6"
+python_version = "3.11"
