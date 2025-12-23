@@ -3,10 +3,11 @@ import os
 import pathlib
 import re
 import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 from html import escape
-from multiprocessing import Process
 from queue import Queue
 from random import random
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
@@ -30,6 +31,10 @@ from safaribooks_config import (
 from safaribooks_display import Display
 from safaribooks_winqueue import WinQueue
 from safaribooks_diagnostics import DiagnosticCollector, FailureCategory
+from safaribooks_browser_auth import browser_login
+
+# HTTP timeout for all requests (prevents infinite hanging)
+REQUESTS_TIMEOUT = 30  # seconds
 
 
 class SafariBooks:
@@ -155,18 +160,40 @@ class SafariBooks:
 
         self.jwt = {}
 
-        if not args.cred:
-            if not os.path.isfile(COOKIES_FILE):
-                self.display.exit("Login: unable to find `cookies.json` file.\n"
-                                  "    Please use the `--cred` or `--login` options to perform the login.")
+        # Show deprecation warning for --cred/--login (but don't block)
+        if args.cred:
+            self.display.out("\n[!] Note: --cred and --login are deprecated (O'Reilly API changed).")
+            self.display.out("    Will use browser-based authentication instead.\n")
 
-            self.session.cookies.update(json.load(open(COOKIES_FILE)))
+        # Try to load existing cookies
+        cookies_loaded = False
+        if os.path.isfile(COOKIES_FILE):
+            try:
+                with open(COOKIES_FILE) as f:
+                    self.session.cookies.update(json.load(f))
+                cookies_loaded = True
+            except (json.JSONDecodeError, IOError) as e:
+                self.display.out(f"[!] Warning: Could not load cookies.json: {e}")
 
-        else:
-            self.display.info("Logging into Safari Books Online...", state=True)
-            self.do_login(*args.cred)
-            if not args.no_cookies:
-                json.dump(self.session.cookies.get_dict(), open(COOKIES_FILE, 'w'))
+        # Validate session if cookies were loaded
+        session_valid = False
+        if cookies_loaded:
+            self.display.info("Validating stored session...", state=True)
+            session_valid, error_msg = self.validate_session()
+            if not session_valid:
+                self.display.out(f"\n[!] Session invalid: {error_msg}")
+
+        # If no valid session, use browser login
+        if not session_valid:
+            try:
+                cookies = browser_login(COOKIES_FILE)
+                self.session.cookies.update(cookies)
+            except FileNotFoundError as e:
+                self.display.exit(f"Browser login failed: {e}")
+            except KeyboardInterrupt:
+                self.display.exit("Login cancelled.")
+            except Exception as e:
+                self.display.exit(f"Browser login error: {e}")
 
         self.check_login()
 
@@ -247,7 +274,9 @@ class SafariBooks:
         self.create_epub()
 
         if not args.no_cookies:
-            json.dump(self.session.cookies.get_dict(), open(COOKIES_FILE, "w"))
+            with open(COOKIES_FILE, 'w') as f:
+                json.dump(self.session.cookies.get_dict(), f)
+            os.chmod(COOKIES_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600 - owner read/write only
 
         # Diagnostic finalization (only when --debug enabled)
         if self.diagnostics.enabled:
@@ -258,6 +287,12 @@ class SafariBooks:
             self.display.out(self.diagnostics.print_summary())
 
         self.display.done(os.path.join(self.BOOK_PATH, self.epub_filename))
+
+        # Run EPUB conversion if requested
+        if getattr(args, 'convert', False):
+            epub_path = os.path.join(self.BOOK_PATH, self.epub_filename)
+            self.run_conversion(epub_path)
+
         self.display.unregister()
 
         if not self.display.in_error and not args.log:
@@ -270,12 +305,13 @@ class SafariBooks:
                 cookie_key, cookie_value = morsel.split(";")[0].split("=")
                 self.session.cookies.set(cookie_key, cookie_value)
 
-    def requests_provider(self, url, is_post=False, data=None, perform_redirect=True, **kwargs):
+    def requests_provider(self, url, is_post=False, data=None, perform_redirect=True, timeout=REQUESTS_TIMEOUT, **kwargs):
         try:
             response = getattr(self.session, "post" if is_post else "get")(
                 url,
                 data=data,
                 allow_redirects=False,
+                timeout=timeout,
                 **kwargs
             )
 
@@ -378,6 +414,38 @@ class SafariBooks:
             self.display.exit("Authentication issue: account subscription expired.")
 
         self.display.info("Successfully authenticated.", state=True)
+
+    def validate_session(self) -> tuple:
+        """
+        Test if stored cookies are still valid by making a test API request.
+
+        Returns:
+            Tuple of (is_valid: bool, error_message: str)
+        """
+        try:
+            response = self.requests_provider(PROFILE_URL, perform_redirect=False)
+
+            if response == 0:
+                return False, "Connection error"
+
+            if response.status_code == 401:
+                return False, "Session expired"
+
+            if response.status_code == 403:
+                return False, "Access forbidden"
+
+            if response.status_code != 200:
+                return False, f"HTTP {response.status_code}"
+
+            if "user_type\":\"Expired\"" in response.text:
+                return False, "Subscription expired"
+
+            return True, ""
+
+        except requests.Timeout:
+            return False, "Connection timeout"
+        except Exception as e:
+            return False, str(e)
 
     def get_book_info(self):
         response = self.requests_provider(self.api_url)
@@ -988,7 +1056,7 @@ class SafariBooks:
                 self.diagnostics.record_success("css", url, {"cached": True})
 
             else:
-                response = self.requests_provider(url)
+                response = self.requests_provider(url, stream=True)
                 if response == 0:
                     # Record failure with context
                     self.diagnostics.record_failure(
@@ -999,7 +1067,8 @@ class SafariBooks:
                     return  # Exit but finally block will update queue
 
                 with open(css_file, 'wb') as s:
-                    s.write(response.content)
+                    for chunk in response.iter_content(1024):
+                        s.write(chunk)
                 # Record success for downloaded file
                 self.diagnostics.record_success("css", url)
 
@@ -1059,26 +1128,13 @@ class SafariBooks:
             self.images_done_queue.put(1)
             self.display.state(len(self.images), self.images_done_queue.qsize())
 
-    def _start_multiprocessing(self, operation, full_queue):
-        if len(full_queue) > 5:
-            for i in range(0, len(full_queue), 5):
-                self._start_multiprocessing(operation, full_queue[i:i + 5])
-
-        else:
-            process_queue = [Process(target=operation, args=(arg,)) for arg in full_queue]
-            for proc in process_queue:
-                proc.start()
-
-            for proc in process_queue:
-                proc.join()
-
     def collect_css(self):
         self.display.state_status.value = -1
 
         # Set expected CSS count for diagnostics
         self.diagnostics.set_expected("css", len(self.css))
 
-        # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
+        # Sequential download to avoid rate limiting detection
         for css_url in self.css:
             self._thread_download_css(css_url)
 
@@ -1302,7 +1358,7 @@ class SafariBooks:
         # Set expected image count for diagnostics
         self.diagnostics.set_expected("images", len(self.images))
 
-        # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
+        # Sequential download to avoid rate limiting detection
         for image_url in self.images:
             self._thread_download_images(image_url)
 
@@ -1492,3 +1548,31 @@ class SafariBooks:
 
         shutil.make_archive(zip_file, 'zip', self.BOOK_PATH)
         os.rename(zip_file + ".zip", os.path.join(self.BOOK_PATH, self.epub_filename))
+
+    def run_conversion(self, epub_path):
+        """Run convert-epub.sh to produce a cleaned final.epub via mobi round-trip."""
+        script_path = os.path.join(PATH, "scripts", "convert-epub.sh")
+
+        if not os.path.isfile(script_path):
+            self.display.out(f"[!] Conversion script not found: {script_path}")
+            return False
+
+        self.display.out("\n")  # Newline before conversion output
+        try:
+            result = subprocess.run(
+                [script_path, epub_path],
+                timeout=600  # 10 minute timeout for large books
+            )
+            if result.returncode == 0:
+                final_epub = epub_path.replace(".epub", ".final.epub")
+                self.display.out(f"[OK] Converted: {final_epub}")
+                return True
+            else:
+                self.display.out(f"[!] Conversion failed (exit code {result.returncode})")
+                return False
+        except subprocess.TimeoutExpired:
+            self.display.out("\n[!] Conversion timed out after 10 minutes")
+            return False
+        except Exception as e:
+            self.display.out(f"\n[!] Conversion error: {e}")
+            return False

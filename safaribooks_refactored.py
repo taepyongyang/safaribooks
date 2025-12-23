@@ -15,7 +15,6 @@ See README.md for details.
 """
 
 import argparse
-import getpass
 import sys
 
 # Import configuration constants
@@ -58,6 +57,10 @@ if __name__ == "__main__":
         "--debug", dest="debug", action='store_true',
         help="Enable diagnostic mode: track download completeness, validate EPUB integrity, and generate diagnostic report."
     )
+    parser.add_argument(
+        "--convert", dest="convert", action='store_true',
+        help="After download, run EPUB through Calibre conversion (epub→mobi→epub) to clean formatting. Requires Calibre installed."
+    )
     parser.add_argument("--help", action="help", default=argparse.SUPPRESS, help='Show this help message.')
     parser.add_argument(
         "bookid", metavar='<BOOK ID>',
@@ -65,24 +68,27 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    if args.cred or args.login:
-        if args.cred:
-            pre_cred = args.cred
-            user_email = ""
-        else:
-            user_email = input("Email: ")
-            passwd = getpass.getpass("Password: ")
-            pre_cred = f"{user_email}:{passwd}"
 
-        parsed_cred = SafariBooks.parse_cred(pre_cred)
-        if not parsed_cred:
-            parser.error(f"invalid credential: {args.cred if args.cred else user_email + ':*******'}")
-            sys.exit(1)
-        args.cred = parsed_cred
-    else:
-        if args.no_cookies:
-            parser.error("invalid option: `--no-cookies` is valid only if you use the `--cred` option")
-            sys.exit(1)
+    # Handle deprecated --cred/--login flags
+    if args.cred or args.login:
+        print("\n" + "=" * 60)
+        print("DEPRECATION NOTICE")
+        print("=" * 60)
+        print("The --cred and --login options are deprecated.")
+        print("O'Reilly has changed their authentication API.")
+        print()
+        print("The app will now use browser-based authentication:")
+        print("  1. A Chrome window will open to O'Reilly's login page")
+        print("  2. You log in normally (supports SSO, 2FA, etc.)")
+        print("  3. Press ENTER when done - cookies are captured automatically")
+        print("=" * 60 + "\n")
+        # Clear the cred to force browser auth path
+        args.cred = None
+
+    # Validate --no-cookies usage
+    if args.no_cookies and not args.cred:
+        # --no-cookies is now mostly irrelevant but keep for backwards compat
+        pass
 
     SafariBooks(args)
     sys.exit(0)

@@ -10,7 +10,7 @@ import json
 import time
 import zipfile
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+# Type hints use Python 3.11+ built-in generics (dict, list, set) and | union syntax
 from enum import Enum
 from collections import defaultdict
 
@@ -30,11 +30,11 @@ class FailureRecord:
     category: FailureCategory
     stage: str                    # e.g., "chapters", "css", "images", "epub"
     url: str
-    status_code: Optional[int] = None
+    status_code: int | None = None
     error_message: str = ""
     content_sample: str = ""      # First 500 chars of response/content
     timestamp: float = field(default_factory=time.time)
-    context: Dict = field(default_factory=dict)  # Additional metadata
+    context: dict = field(default_factory=dict)  # Additional metadata
 
 
 @dataclass
@@ -80,7 +80,7 @@ class DiagnosticCollector:
         self.start_time = time.time()
 
         # Stage metrics tracking
-        self.stages: Dict[str, StageMetrics] = {
+        self.stages: dict[str, StageMetrics] = {
             "chapters": StageMetrics(),
             "css": StageMetrics(),
             "css_assets": StageMetrics(),  # Fonts and images referenced in CSS
@@ -89,10 +89,10 @@ class DiagnosticCollector:
         }
 
         # Detailed failure records
-        self.failures: List[FailureRecord] = []
+        self.failures: list[FailureRecord] = []
 
         # Asset tracking for cross-referencing
-        self.detected_assets: Dict[str, Set[str]] = {
+        self.detected_assets: dict[str, set[str]] = {
             "css": set(),           # URLs found in HTML
             "images": set(),        # URLs found in HTML (including link_replace)
             "downloaded_css": set(),
@@ -100,15 +100,15 @@ class DiagnosticCollector:
         }
 
         # Reference tracking for EPUB validation
-        self.chapter_files: List[str] = []      # Expected chapter files
-        self.toc_references: Set[str] = set()   # TOC href references
+        self.chapter_files: list[str] = []      # Expected chapter files
+        self.toc_references: set[str] = set()   # TOC href references
 
         # Pagination tracking for get_book_chapters
-        self.pagination_pages: List[int] = []
-        self.pagination_errors: List[Dict] = []
+        self.pagination_pages: list[int] = []
+        self.pagination_errors: list[dict] = []
 
         # Chapter metadata tracking (raw API data for debugging)
-        self.chapter_metadata: List[Dict] = []
+        self.chapter_metadata: list[dict] = []
 
     # ============================================================
     # Stage Tracking Methods
@@ -121,7 +121,7 @@ class DiagnosticCollector:
         if stage in self.stages:
             self.stages[stage].expected = count
 
-    def record_success(self, stage: str, identifier: str, metadata: Dict = None) -> None:
+    def record_success(self, stage: str, identifier: str, metadata: dict = None) -> None:
         """Record successful completion of an item."""
         if not self.enabled:
             return
@@ -142,10 +142,10 @@ class DiagnosticCollector:
         stage: str,
         url: str,
         category: FailureCategory,
-        status_code: Optional[int] = None,
+        status_code: int | None = None,
         error_message: str = "",
         content_sample: str = "",
-        context: Dict = None
+        context: dict = None
     ) -> None:
         """Record a failure with full context."""
         if not self.enabled:
@@ -209,7 +209,7 @@ class DiagnosticCollector:
         if not success:
             self.pagination_errors.append({"page": page, "error": error})
 
-    def track_chapter_metadata(self, chapter: Dict) -> None:
+    def track_chapter_metadata(self, chapter: dict) -> None:
         """Track raw chapter metadata from API for debugging."""
         if not self.enabled:
             return
@@ -226,7 +226,7 @@ class DiagnosticCollector:
     # EPUB Validation
     # ============================================================
 
-    def validate_epub(self, epub_path: str) -> Dict:
+    def validate_epub(self, epub_path: str) -> dict:
         """
         Validate EPUB integrity before completion.
 
@@ -296,7 +296,7 @@ class DiagnosticCollector:
     # Report Generation
     # ============================================================
 
-    def generate_report(self) -> Dict:
+    def generate_report(self) -> dict:
         """
         Generate comprehensive diagnostic report.
 
@@ -375,7 +375,7 @@ class DiagnosticCollector:
         else:
             return "FAILED"
 
-    def _serialize_failure(self, f: FailureRecord) -> Dict:
+    def _serialize_failure(self, f: FailureRecord) -> dict:
         """Convert FailureRecord to serializable dict."""
         return {
             "category": f.category.value,
