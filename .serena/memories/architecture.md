@@ -23,14 +23,22 @@ safaribooks-dev/
 - Entry point that instantiates SafariBooks class
 
 ### safaribooks_process.py
-**SafariBooks class** (28 methods):
+**SafariBooks class** (~30 methods):
 - Authentication: `do_login()`, `check_login()`, `parse_cred()`
 - Session management: `requests_provider()`, `handle_cookie_update()`
 - Book retrieval: `get_book_info()`, `get_book_chapters()`
 - Content processing: `get_html()`, `parse_html()`, `link_replace()`
-- Asset handling: `collect_css()`, `collect_images()`, `get_cover()`
+- Filename handling: `fix_duplicate_filenames()`, `build_filename_mapping()`
+- Asset handling: `collect_css()`, `collect_css_assets()`, `collect_images()`, `get_cover()`
+- Asset validation: `_validate_asset_path()`, `download_css_asset()`
 - EPUB generation: `create_content_opf()`, `create_toc()`, `create_epub()`
 - Threading: `_thread_download_css()`, `_thread_download_images()`
+
+### safaribooks_diagnostics.py
+**DiagnosticCollector class**:
+- Tracks download completeness when `--debug` enabled
+- Compares expected vs actual counts for chapters, CSS, images
+- Generates JSON diagnostic report with failure details
 
 ### safaribooks_display.py
 **Display class** (16 methods):

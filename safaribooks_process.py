@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from html import escape
 from queue import Queue
 from random import random
@@ -129,6 +130,11 @@ class SafariBooks:
 
     # Valid book ID patterns: ISBN-10, ISBN-13, or O'Reilly internal IDs
     BOOK_ID_PATTERN = re.compile(r'^[0-9]{10,13}$')
+
+    @property
+    def debug(self) -> bool:
+        """Check if debug mode is enabled."""
+        return getattr(self.args, 'debug', False)
 
     def __init__(self, args):
         self.args = args
@@ -544,8 +550,7 @@ class SafariBooks:
         return root
 
 
-    @staticmethod
-    def fix_duplicate_filenames(chapters):
+    def fix_duplicate_filenames(self, chapters):
         """
         Fix duplicate filenames by deriving unique names from content URLs.
         
@@ -553,9 +558,12 @@ class SafariBooks:
         causing them to overwrite each other. This method extracts unique
         identifiers from the content URL path.
         
+        For boxed sets with identical directory structures across books,
+        a second pass adds numeric suffixes to remaining duplicates.
+        
         Example: .../html/ch1/index.xhtml -> ch1_index.xhtml
         """
-        from collections import Counter
+        debug = self.debug
         
         # Count filename occurrences
         filename_counts = Counter(c.get("filename", "") for c in chapters)
@@ -566,7 +574,12 @@ class SafariBooks:
         if not duplicates:
             return chapters  # No duplicates, return as-is
         
-        # Fix duplicate filenames
+        if debug:
+            self.display.log(f"Duplicate detection: Found {len(duplicates)} duplicate filename patterns")
+            for dup in sorted(duplicates):
+                self.display.log(f"  - '{dup}' appears {filename_counts[dup]} times")
+        
+        # First pass: Fix duplicate filenames using parent directory
         for chapter in chapters:
             filename = chapter.get("filename", "")
             if filename in duplicates:
@@ -590,6 +603,52 @@ class SafariBooks:
                         # Clean up double extensions
                         new_filename = new_filename.replace(".xhtml.xhtml", ".xhtml")
                         chapter["filename"] = new_filename
+        
+        # Second pass: Check for REMAINING duplicates (common in boxed sets)
+        # e.g., 6 books all with xhtml/cover.xhtml -> all became xhtml_cover.xhtml
+        filename_counts = Counter(c.get("filename", "") for c in chapters)
+        remaining_duplicates = {f for f, count in filename_counts.items() if count > 1}
+        
+        if remaining_duplicates:
+            if debug:
+                self.display.log(f"Boxed set detected: {len(remaining_duplicates)} duplicates remain after first pass")
+                for dup in sorted(remaining_duplicates):
+                    self.display.log(f"  - '{dup}' still appears {filename_counts[dup]} times")
+            
+            # Add numeric suffix to make them unique
+            # Track occurrence count for each duplicate filename
+            seen_counts = {}
+            for chapter in chapters:
+                filename = chapter.get("filename", "")
+                if filename in remaining_duplicates:
+                    # Get occurrence index for this filename
+                    if filename not in seen_counts:
+                        seen_counts[filename] = 0
+                    else:
+                        seen_counts[filename] += 1
+                    
+                    count = seen_counts[filename]
+                    if count > 0:  # Keep first occurrence as-is, suffix subsequent ones
+                        # Split off extension to insert suffix
+                        if "." in filename:
+                            name_part, ext = filename.rsplit(".", 1)
+                            new_filename = f"{name_part}_{count}.{ext}"
+                        else:
+                            new_filename = f"{filename}_{count}"
+                        
+                        if debug:
+                            self.display.log(f"  Renamed: {filename} -> {new_filename}")
+                        
+                        chapter["filename"] = new_filename
+        
+        # Final verification
+        if debug:
+            final_counts = Counter(c.get("filename", "") for c in chapters)
+            final_duplicates = {f for f, count in final_counts.items() if count > 1}
+            if final_duplicates:
+                self.display.log(f"WARNING: {len(final_duplicates)} duplicates still remain after fix!")
+            else:
+                self.display.log(f"Duplicate fix complete: All {len(chapters)} chapter filenames are unique")
         
         return chapters
 
@@ -671,9 +730,28 @@ class SafariBooks:
     def link_replace(self, link):
         if link and not link.startswith("mailto"):
             if not self.url_is_absolute(link):
-                if any(x in link for x in ["cover", "images", "graphics"]) or \
-                        self.is_image_link(link):
+                # Check if this is actually an image file
+                # Note: "cover" keyword alone is not enough - must also be an image extension
+                # to avoid treating chapter links like "cover.xhtml" as images
+                link_lower = link.lower()
+                is_image_by_extension = self.is_image_link(link)
+                is_in_image_directory = any(x in link_lower for x in ["images/", "graphics/"])
+                is_cover_image = "cover" in link_lower and is_image_by_extension
+                
+                if is_image_by_extension or is_in_image_directory or is_cover_image:
                     image = link.split("/")[-1]
+                    
+                    # Debug logging for image detection
+                    if self.debug:
+                        detection_reason = []
+                        if is_image_by_extension:
+                            detection_reason.append("image_extension")
+                        if is_in_image_directory:
+                            detection_reason.append("image_directory")
+                        if is_cover_image:
+                            detection_reason.append("cover_image")
+                        self.display.log(f"Image detected: {link} -> Images/{image} (reason: {', '.join(detection_reason)})")
+                    
                     # Track detected image for cross-reference validation
                     self.diagnostics.track_detected_asset("images", image)
                     
@@ -691,6 +769,11 @@ class SafariBooks:
                             self.display.log("Crawler: found additional image: %s" % image)
                     
                     return "Images/" + image
+                
+                # Debug: Log links that contain "cover" but are NOT treated as images
+                if "cover" in link_lower and not is_image_by_extension:
+                    if self.debug:
+                        self.display.log(f"Link contains 'cover' but not an image (skipped): {link}")
 
                 # Handle chapter-to-chapter links using filename mapping
                 # Separate any anchor from the path
@@ -932,7 +1015,6 @@ class SafariBooks:
         clean_author = clean_author.strip(' .')
         
         # Replace multiple consecutive underscores/spaces with single
-        import re
         clean_title = re.sub(r'[_\s]+', ' ', clean_title).strip()
         clean_author = re.sub(r'[_\s]+', ' ', clean_author).strip()
         
@@ -1187,22 +1269,42 @@ class SafariBooks:
     def _validate_asset_path(self, asset_path):
         """
         Validate asset path for security (prevent path traversal attacks).
-        Returns (is_safe, normalized_path) tuple.
+        Handles relative paths like '../Misc/font.woff2' by resolving them
+        relative to OEBPS directory.
+        
+        Returns (is_safe, resolved_path, target_dir) tuple.
+        - resolved_path: path relative to OEBPS (e.g., 'Misc/font.woff2')
+        - target_dir: full filesystem path to target directory
         """
-        # Normalize the path to resolve any '..' or '.' components
-        normalized_path = os.path.normpath(asset_path)
-
-        # Security: Block path traversal attempts
+        oebps_path = os.path.join(self.BOOK_PATH, "OEBPS")
+        
+        # Resolve path relative to Styles/ directory (where CSS files live)
+        # '../Misc/font.woff2' from Styles/ becomes 'Misc/font.woff2' relative to OEBPS
+        styles_relative = os.path.join("Styles", asset_path)
+        normalized_path = os.path.normpath(styles_relative)
+        
+        # Security: Ensure resolved path doesn't escape OEBPS
+        # After normpath, path should not start with '..' or be absolute
         if normalized_path.startswith('..') or os.path.isabs(normalized_path):
-            self.display.log(f"Security: Rejected unsafe asset path: {asset_path}")
-            return False, None
-
-        # Security: Block paths with parent directory references
-        if '..' in normalized_path:
-            self.display.log(f"Security: Blocked path traversal attempt: {asset_path}")
-            return False, None
-
-        return True, normalized_path
+            self.display.log(f"Security: Rejected path escaping OEBPS: {asset_path} -> {normalized_path}")
+            return False, None, None
+        
+        # Compute full target path and verify it's within OEBPS
+        full_target_path = os.path.abspath(os.path.join(oebps_path, normalized_path))
+        oebps_abs = os.path.abspath(oebps_path)
+        
+        if not full_target_path.startswith(oebps_abs):
+            self.display.log(f"Security: Path escape attempt blocked: {asset_path}")
+            return False, None, None
+        
+        # Extract the directory part (e.g., 'Misc' from 'Misc/font.woff2')
+        target_dir = os.path.dirname(full_target_path)
+        
+        # Debug logging
+        if self.debug:
+            self.display.log(f"CSS asset path resolved: {asset_path} -> {normalized_path} (dir: {target_dir})")
+        
+        return True, normalized_path, target_dir
 
     def _validate_asset_url(self, asset_url):
         """
@@ -1228,55 +1330,52 @@ class SafariBooks:
     def download_css_asset(self, asset_path, base_css_url):
         """
         Download a single CSS-referenced asset (font or image).
-        asset_path: relative path like 'fonts/DejaVu.ttf' or 'icons/note.png'
+        asset_path: relative path like 'fonts/DejaVu.ttf' or '../Misc/font.woff2'
         base_css_url: URL of a CSS file to derive the asset URL
 
         Security: Validates paths and URLs to prevent path traversal and SSRF.
         Uses atomic file writes to prevent corruption on failure.
+        
+        Returns tuple (success: bool, resolved_path: str or None)
+        - resolved_path is relative to OEBPS (e.g., 'Misc/font.woff2')
         """
-        # Security: Validate asset path
-        is_safe, normalized_path = self._validate_asset_path(asset_path)
+        # Security: Validate asset path and resolve relative to OEBPS
+        is_safe, resolved_path, target_dir = self._validate_asset_path(asset_path)
         if not is_safe:
-            return False
+            return False, None
 
-        # Determine the target path in OEBPS/Styles/
-        target_path = os.path.join(self.css_path, normalized_path)
+        # Determine the target file path
+        oebps_path = os.path.join(self.BOOK_PATH, "OEBPS")
+        target_path = os.path.join(oebps_path, resolved_path)
 
-        # Security: Double-check that target is within css_path
-        target_path = os.path.abspath(target_path)
-        css_path_abs = os.path.abspath(self.css_path)
-        if not target_path.startswith(css_path_abs):
-            self.display.log(f"Security: Path escape attempt blocked: {asset_path}")
-            return False
-
-        target_dir = os.path.dirname(target_path)
-
-        # Create subdirectory if needed (e.g., Styles/fonts/)
+        # Create target directory if needed (e.g., OEBPS/Misc/)
         if target_dir and not os.path.isdir(target_dir):
             os.makedirs(target_dir, exist_ok=True)
+            if self.debug:
+                self.display.log(f"Created directory for CSS asset: {target_dir}")
 
         # Skip if already exists
         if os.path.isfile(target_path):
-            self.display.log(f"CSS asset already exists: {asset_path}")
-            return True
+            self.display.log(f"CSS asset already exists: {resolved_path}")
+            return True, resolved_path
 
         # Construct the asset URL from the CSS URL base
         if not base_css_url:
             self.display.log(f"No base URL for asset: {asset_path}")
-            return False
+            return False, None
 
         base_url = base_css_url.rsplit('/', 1)[0] + '/'
         asset_url = urljoin(base_url, asset_path)
 
         # Security: Validate the constructed URL
         if not self._validate_asset_url(asset_url):
-            return False
+            return False, None
 
         # Download the asset
         response = self.requests_provider(asset_url, stream=True)
         if response == 0:
             self.display.log(f"Failed to download CSS asset: {asset_path} from {asset_url}")
-            return False
+            return False, None
 
         # Atomic write: Write to temp file first, then rename on success
         temp_file_path = None
@@ -1290,12 +1389,12 @@ class SafariBooks:
             # Atomic rename on success
             shutil.move(temp_file_path, target_path)
             temp_file_path = None  # Successfully moved, don't delete in finally
-            self.display.log(f"Downloaded CSS asset: {asset_path}")
-            return True
+            self.display.log(f"Downloaded CSS asset: {resolved_path}")
+            return True, resolved_path
 
         except Exception as e:
             self.display.log(f"Error saving CSS asset {asset_path}: {e}")
-            return False
+            return False, None
 
         finally:
             # Clean up temp file on failure
@@ -1309,6 +1408,7 @@ class SafariBooks:
         """
         Parse CSS files for url() references and download fonts/images.
         Includes diagnostic tracking for completeness monitoring.
+        Assets may be saved to various directories (Styles/, Misc/, etc.)
         """
         if not self.css:
             return
@@ -1330,10 +1430,15 @@ class SafariBooks:
 
         downloaded = 0
         failed = 0
+        resolved_paths = []  # Track resolved paths for manifest generation
+        
         for asset_path in css_assets:
-            if self.download_css_asset(asset_path, base_css_url):
+            success, resolved_path = self.download_css_asset(asset_path, base_css_url)
+            if success:
                 downloaded += 1
                 self.diagnostics.record_success("css_assets", asset_path)
+                if resolved_path:
+                    resolved_paths.append(resolved_path)
             else:
                 failed += 1
                 self.diagnostics.record_failure(
@@ -1343,8 +1448,9 @@ class SafariBooks:
 
         self.display.log(f"CSS assets: {downloaded} downloaded, {failed} failed")
 
-        # Store the asset paths for manifest generation
-        self.css_asset_paths = list(css_assets.keys())
+        # Store the resolved paths for manifest generation
+        # These are relative to OEBPS (e.g., 'Styles/fonts/x.ttf' or 'Misc/font.woff2')
+        self.css_asset_paths = resolved_paths
 
     def collect_images(self):
         if self.display.book_ad_info == 2:
@@ -1369,18 +1475,58 @@ class SafariBooks:
 
         manifest = []
         spine = []
+
+        # Track chapter manifest entries to detect duplicates (safety check for boxed sets)
+        seen_chapter_ids = {}
+        seen_chapter_files = {}
+
         for c in self.book_chapters:
             c["filename"] = c["filename"].replace(".html", ".xhtml")
             item_id = escape("".join(c["filename"].split(".")[:-1]))
+
+            # Check for duplicate manifest IDs (should be fixed by fix_duplicate_filenames)
+            if item_id in seen_chapter_ids:
+                if self.debug:
+                    self.display.log(f"WARNING: Duplicate chapter manifest ID: {item_id} (file: {c['filename']}, previous: {seen_chapter_ids[item_id]})")
+                # Skip to avoid invalid EPUB manifest
+                continue
+
+            # Check for duplicate filenames
+            if c["filename"] in seen_chapter_files:
+                if self.debug:
+                    self.display.log(f"WARNING: Duplicate chapter filename: {c['filename']} (title: {c.get('title', 'N/A')})")
+                continue
+
+            seen_chapter_ids[item_id] = c["filename"]
+            seen_chapter_files[c["filename"]] = item_id
+
             manifest.append("<item id=\"{0}\" href=\"{1}\" media-type=\"application/xhtml+xml\" />".format(
                 item_id, c["filename"]
             ))
             spine.append("<itemref idref=\"{0}\"/>".format(item_id))
 
+        # Track manifest IDs to detect duplicates
+        seen_image_ids = {}
         for i in set(self.images):
-            dot_split = i.split(".")
-            head = "img_" + escape("".join(dot_split[:-1]))
-            extension = dot_split[-1]
+            # Use rsplit to split only on last dot, preserving dots in filename
+            # This prevents ID collisions between e.g., "11.9.png" and "119.png"
+            parts = i.rsplit(".", 1)
+            if len(parts) == 2:
+                base_name = parts[0].replace(".", "_")
+                extension = parts[1]
+                head = "img_" + escape(base_name) + "_" + escape(extension)
+            else:
+                # No extension (shouldn't happen for valid images)
+                extension = ""
+                head = "img_" + escape(i)
+
+            # Check for duplicate manifest IDs (shouldn't happen now with extension in ID)
+            if head in seen_image_ids:
+                if self.debug:
+                    self.display.log(f"WARNING: Duplicate image manifest ID: {head} (files: {seen_image_ids[head]}, {i})")
+                continue
+            seen_image_ids[head] = i
+
             manifest.append("<item id=\"{0}\" href=\"Images/{1}\" media-type=\"image/{2}\" />".format(
                 head, i, "jpeg" if "jp" in extension else extension
             ))
@@ -1390,10 +1536,14 @@ class SafariBooks:
                             "media-type=\"text/css\" />".format(i))
 
         # Add CSS-referenced assets (fonts and icons) to manifest
+        # asset_path is relative to OEBPS (e.g., 'Styles/fonts/x.ttf' or 'Misc/font.woff2')
+        oebps_path = os.path.join(self.BOOK_PATH, "OEBPS")
         for asset_path in getattr(self, 'css_asset_paths', []):
             # Check if the file actually exists
-            full_path = os.path.join(self.css_path, asset_path)
+            full_path = os.path.join(oebps_path, asset_path)
             if not os.path.isfile(full_path):
+                if self.debug:
+                    self.display.log(f"CSS asset not found for manifest: {asset_path}")
                 continue
 
             # Generate unique ID from path
@@ -1422,7 +1572,8 @@ class SafariBooks:
             else:
                 media_type = 'application/octet-stream'
 
-            manifest.append("<item id=\"{0}\" href=\"Styles/{1}\" media-type=\"{2}\" />".format(
+            # asset_path is already relative to OEBPS, use directly
+            manifest.append("<item id=\"{0}\" href=\"{1}\" media-type=\"{2}\" />".format(
                 safe_id, asset_path, media_type
             ))
 
@@ -1433,6 +1584,23 @@ class SafariBooks:
         subjects = "\n".join("<dc:subject>{0}</dc:subject>".format(escape(sub.get("name", "n/d")))
                              for sub in self.book_info.get("subjects", []))
 
+        # Convert cover path to manifest ID
+        # self.cover is like "Images/cover.jpg" or "default_cover.jpg"
+        # The manifest ID should be like "img_cover_jpg" (includes extension for uniqueness)
+        cover_manifest_id = ""
+        if self.cover:
+            # Extract just the filename (in case it has Images/ prefix)
+            cover_filename = self.cover.split("/")[-1] if "/" in str(self.cover) else str(self.cover)
+            # Generate ID same way as image manifest entries: img_ + base name + extension
+            cover_parts = cover_filename.split(".")
+            cover_base = "".join(cover_parts[:-1])
+            cover_ext = cover_parts[-1] if len(cover_parts) > 1 else ""
+            cover_manifest_id = "img_" + escape(cover_base) + "_" + escape(cover_ext)
+
+            # Debug logging for cover manifest ID
+            if self.debug:
+                self.display.log(f"Cover manifest ID: {self.cover} -> {cover_manifest_id}")
+
         return self.CONTENT_OPF.format(
             (self.book_info.get("isbn",  self.book_id)),
             escape(self.book_title),
@@ -1442,7 +1610,7 @@ class SafariBooks:
             ", ".join(escape(pub.get("name", "")) for pub in self.book_info.get("publishers", [])),
             escape(self.book_info.get("rights", "")),
             self.book_info.get("issued", ""),
-            self.cover,
+            cover_manifest_id,
             "\n".join(manifest),
             "\n".join(spine),
             self.book_chapters[0]["filename"].replace(".html", ".xhtml")
