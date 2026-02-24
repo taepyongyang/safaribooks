@@ -28,6 +28,13 @@ SafariBooks is a Python CLI tool for downloading and generating EPUB files from 
 - Books saved to `Books/` directory
 - No formal test suite exists
 
+## Recent Improvements (2026-02-24)
+- Migrated from retired v1 API to v2 API using adapter pattern (all changes in safaribooks_process.py)
+- Added safe_json_response() to prevent JSONDecodeError crashes
+- Fixed session validation (switched from PROFILE_URL to v2 search API)
+- V2 uses offset pagination, split metadata endpoints, different TOC format
+- CRITICAL: expired orm-jwt returns HTTP 200 with truncated preview content (no error code)
+
 ## Recent Improvements (2025-12-23)
 - Fixed duplicate filename handling for chapters
 - Added internal link rewriting with filename mapping

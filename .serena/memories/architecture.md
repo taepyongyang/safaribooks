@@ -26,7 +26,8 @@ safaribooks-dev/
 **SafariBooks class** (~30 methods):
 - Authentication: `do_login()`, `check_login()`, `parse_cred()`
 - Session management: `requests_provider()`, `handle_cookie_update()`
-- Book retrieval: `get_book_info()`, `get_book_chapters()`
+- Book retrieval: `get_book_info()`, `get_book_chapters()` (v2 API with adapter pattern)
+- V2 helpers: `safe_json_response()`, `_extract_filename_from_reference_id()`, `_extract_href_from_reference_id()`, `_reshape_toc_v2_to_v1()`
 - Content processing: `get_html()`, `parse_html()`, `link_replace()`
 - Filename handling: `fix_duplicate_filenames()`, `build_filename_mapping()`
 - Asset handling: `collect_css()`, `collect_css_assets()`, `collect_images()`, `get_cover()`

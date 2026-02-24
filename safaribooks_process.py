@@ -47,7 +47,12 @@ class SafariBooks:
     LOGIN_URL = ORLY_BASE_URL + "/member/auth/login/"
     LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
 
-    API_TEMPLATE = SAFARI_BASE_URL + "/api/v1/book/{0}/"
+    # V2 API endpoints (v1 retired, returns 404 for all books)
+    API_V2_EPUBS    = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/"
+    API_V2_CHAPTERS = SAFARI_BASE_URL + "/api/v2/epub-chapters/?epub_identifier=urn:orm:book:{0}&limit=100&offset={1}"
+    API_V2_TOC      = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/table-of-contents/"
+    API_V2_SEARCH   = SAFARI_BASE_URL + "/api/v2/search/?query={0}&limit=1"
+    API_V2_FILES    = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/files"
 
     BASE_01_HTML = "<!DOCTYPE html>\n" \
                    "<html lang=\"en\" xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\"" \
@@ -204,7 +209,7 @@ class SafariBooks:
         self.check_login()
 
         self.book_id = args.bookid
-        self.api_url = self.API_TEMPLATE.format(self.book_id)
+        self.api_url = self.API_V2_EPUBS.format(self.book_id)
 
         self.display.info("Retrieving book info...")
         self.book_info = self.get_book_info()
@@ -339,6 +344,74 @@ class SafariBooks:
 
         return response
 
+    def safe_json_response(self, response, context="API"):
+        """Safely parse JSON from a response, with helpful error messages on failure."""
+        try:
+            return response.json()
+        except (json.JSONDecodeError, ValueError):
+            status = response.status_code
+            body_preview = response.text[:500] if response.text else "(empty response)"
+            self.display.error(
+                f"{context}: HTTP {status} - expected JSON but got:\n    {body_preview}"
+            )
+            if status == 403:
+                self.display.exit(
+                    f"{context}: Access forbidden (HTTP 403). Your cookies may be expired "
+                    "or your subscription may not include this content.\n"
+                    "    Try refreshing cookies: python3 sso_cookies.py \"<cookie_string>\""
+                )
+            elif status == 401:
+                self.display.exit(
+                    f"{context}: Authentication failed (HTTP 401). Your session has expired.\n"
+                    "    Try refreshing cookies: python3 sso_cookies.py \"<cookie_string>\""
+                )
+            elif status == 404:
+                self.display.exit(
+                    f"{context}: Not found (HTTP 404). Check that the book ID is correct."
+                )
+            else:
+                self.display.exit(
+                    f"{context}: Unexpected response (HTTP {status}). "
+                    "The API may have changed or your session may be invalid.\n"
+                    "    Try refreshing cookies: python3 sso_cookies.py \"<cookie_string>\""
+                )
+
+    @staticmethod
+    def _extract_filename_from_reference_id(ref_id):
+        """Extract filename from v2 reference_id like '9781633437333-/Text/preface.html'."""
+        if not ref_id:
+            return "unknown.html"
+        # Split on '/' and take the last component
+        return ref_id.split("/")[-1] or "unknown.html"
+
+    @staticmethod
+    def _extract_href_from_reference_id(ref_id):
+        """Extract path from v2 reference_id for TOC href mapping.
+        '9781633437333-/Text/preface.html' -> 'Text/preface.html'
+        """
+        if not ref_id:
+            return ""
+        if "-/" in ref_id:
+            return ref_id.split("-/", 1)[1]
+        return ref_id.split("/")[-1]
+
+    def _reshape_toc_v2_to_v1(self, entries):
+        """Recursively transform v2 TOC entries to v1 format for parse_toc()."""
+        result = []
+        for entry in entries:
+            ref_id = entry.get("reference_id", "")
+            href = self._extract_href_from_reference_id(ref_id)
+            v1_entry = {
+                "depth": entry.get("depth", 1),
+                "href": href,
+                "fragment": entry.get("fragment", ""),
+                "id": ref_id.replace("/", "_").replace("-", "_") if ref_id else "",
+                "label": entry.get("title", ""),
+                "children": self._reshape_toc_v2_to_v1(entry.get("children", [])),
+            }
+            result.append(v1_entry)
+        return result
+
     @staticmethod
     def parse_cred(cred):
         if ":" not in cred:
@@ -408,28 +481,32 @@ class SafariBooks:
             self.display.exit("Login: unable to reach Safari Books Online. Try again...")
 
     def check_login(self):
-        response = self.requests_provider(PROFILE_URL, perform_redirect=False)
+        # Use v2 search API to verify authentication (profile URL redirects
+        # due to Referer header set in session)
+        test_url = self.API_V2_SEARCH.format(self.book_id)
+        response = self.requests_provider(test_url, perform_redirect=False)
 
         if response == 0:
             self.display.exit("Login: unable to reach Safari Books Online. Try again...")
 
         elif response.status_code != 200:
-            self.display.exit("Authentication issue: unable to access profile page.")
-
-        elif "user_type\":\"Expired\"" in response.text:
-            self.display.exit("Authentication issue: account subscription expired.")
+            self.display.exit("Authentication issue: unable to verify session (HTTP %s)." % response.status_code)
 
         self.display.info("Successfully authenticated.", state=True)
 
     def validate_session(self) -> tuple:
         """
         Test if stored cookies are still valid by making a test API request.
+        Uses v2 search API as a lightweight session check (profile URL redirects
+        due to Referer header).
 
         Returns:
             Tuple of (is_valid: bool, error_message: str)
         """
         try:
-            response = self.requests_provider(PROFILE_URL, perform_redirect=False)
+            # Use v2 search API as session check (lightweight, JSON response)
+            test_url = self.API_V2_SEARCH.format(self.book_id)
+            response = self.requests_provider(test_url, perform_redirect=False)
 
             if response == 0:
                 return False, "Connection error"
@@ -443,9 +520,6 @@ class SafariBooks:
             if response.status_code != 200:
                 return False, f"HTTP {response.status_code}"
 
-            if "user_type\":\"Expired\"" in response.text:
-                return False, "Subscription expired"
-
             return True, ""
 
         except requests.Timeout:
@@ -454,66 +528,135 @@ class SafariBooks:
             return False, str(e)
 
     def get_book_info(self):
-        response = self.requests_provider(self.api_url)
+        # Fetch core metadata from v2 epubs endpoint
+        epubs_url = self.API_V2_EPUBS.format(self.book_id)
+        response = self.requests_provider(epubs_url)
         if response == 0:
             self.display.exit("API: unable to retrieve book info.")
 
-        response = response.json()
-        if not isinstance(response, dict) or len(response.keys()) == 1:
-            self.display.exit(self.display.api_error(response))
+        epub_data = self.safe_json_response(response, context="API (book info)")
+        if not isinstance(epub_data, dict) or "title" not in epub_data:
+            self.display.exit(self.display.api_error(epub_data if isinstance(epub_data, dict) else {}))
 
-        if "last_chapter_read" in response:
-            del response["last_chapter_read"]
+        # Fetch supplementary metadata from search API (authors, cover, publishers)
+        search_url = self.API_V2_SEARCH.format(self.book_id)
+        search_response = self.requests_provider(search_url)
+        search_data = {}
+        if search_response != 0:
+            search_json = self.safe_json_response(search_response, context="API (search)")
+            if isinstance(search_json, dict) and search_json.get("results"):
+                search_data = search_json["results"][0]
 
-        for key, value in response.items():
+        # Build description from v2 descriptions dict
+        descriptions = epub_data.get("descriptions", {})
+        description = descriptions.get("text/plain", "") or descriptions.get("text/html", "")
+
+        # Reshape to v1 format expected by all downstream code
+        result = {
+            "title": epub_data.get("title", "n/a"),
+            "isbn": epub_data.get("isbn") or epub_data.get("identifier", ""),
+            "identifier": epub_data.get("identifier", ""),
+            "description": description,
+            "issued": epub_data.get("publication_date", ""),
+            "authors": [{"name": a} for a in search_data.get("authors", [])],
+            "publishers": [{"name": p} for p in search_data.get("publishers", [])],
+            "web_url": search_data.get("web_url") or (
+                SAFARI_BASE_URL + "/library/view/-/" + self.book_id + "/"
+            ),
+            "subjects": [],
+            "rights": "",
+        }
+
+        # Only include "cover" key if URL is available (downstream checks key existence)
+        cover_url = search_data.get("cover_url", "")
+        if cover_url:
+            result["cover"] = cover_url
+
+        for key, value in result.items():
             if value is None:
-                response[key] = 'n/a'
+                result[key] = 'n/a'
 
-        return response
+        return result
 
-    def get_book_chapters(self, page=1):
-        self.diagnostics.track_pagination(page, success=True)
-        chapter_url = urljoin(self.api_url, "chapter/?page=%s" % page)
-        response = self.requests_provider(chapter_url)
+    def get_book_chapters(self, offset=0):
+        page_num = (offset // 100) + 1
+        self.diagnostics.track_pagination(page_num, success=True)
+
+        chapters_url = self.API_V2_CHAPTERS.format(self.book_id, offset)
+        response = self.requests_provider(chapters_url)
         if response == 0:
-            self.diagnostics.track_pagination(page, success=False, error="API request failed")
+            self.diagnostics.track_pagination(page_num, success=False, error="API request failed")
             self.diagnostics.record_failure(
-                "chapters", chapter_url, FailureCategory.NETWORK,
+                "chapters", chapters_url, FailureCategory.NETWORK,
                 error_message="Unable to retrieve book chapters"
             )
             self.display.exit("API: unable to retrieve book chapters.")
 
-        response = response.json()
+        response_data = self.safe_json_response(response, context="API (chapters)")
 
-        if not isinstance(response, dict) or len(response.keys()) == 1:
+        if not isinstance(response_data, dict) or not response_data.get("results"):
             self.diagnostics.record_failure(
-                "chapters", chapter_url, FailureCategory.VALIDATION,
-                error_message="Invalid API response format",
-                content_sample=str(response)[:500]
-            )
-            self.display.exit(self.display.api_error(response))
-
-        if "results" not in response or not len(response["results"]):
-            self.diagnostics.record_failure(
-                "chapters", chapter_url, FailureCategory.MISSING_CONTENT,
+                "chapters", chapters_url, FailureCategory.MISSING_CONTENT,
                 error_message="No chapter results in API response"
             )
             self.display.exit("API: unable to retrieve book chapters.")
 
-        # Set expected chapter count on first page
-        if page == 1:
-            self.diagnostics.set_expected("chapters", response["count"])
+        if offset == 0:
+            self.diagnostics.set_expected("chapters", response_data.get("count", 0))
 
-        if response["count"] > sys.getrecursionlimit():
-            sys.setrecursionlimit(response["count"])
+        total = response_data.get("count", 0)
+        if total > sys.getrecursionlimit():
+            sys.setrecursionlimit(total)
 
-        result = []
-        result.extend([c for c in response["results"] if "cover" in c["filename"] or "cover" in c["title"]])
-        for c in result:
-            del response["results"][response["results"].index(c)]
+        asset_base_url = self.API_V2_FILES.format(self.book_id)
 
-        result += response["results"]
-        return result + (self.get_book_chapters(page + 1) if response["next"] else [])
+        # Reshape each v2 chapter to v1 format
+        chapters = []
+        for ch in response_data["results"]:
+            related = ch.get("related_assets", {})
+
+            filename = self._extract_filename_from_reference_id(
+                ch.get("reference_id", "")
+            )
+
+            # V2 images are full URLs; strip base to get relative paths
+            # so existing get() method's concatenation works correctly
+            raw_images = related.get("images", [])
+            images = []
+            files_prefix = asset_base_url + "/"
+            for img_url in raw_images:
+                if isinstance(img_url, str) and img_url.startswith(files_prefix):
+                    images.append(img_url[len(files_prefix):])
+                elif isinstance(img_url, str):
+                    images.append(img_url)
+
+            # V2 stylesheets are URL strings; wrap in {"url": str} dicts
+            raw_stylesheets = related.get("stylesheets", [])
+            stylesheets = [{"url": s} for s in raw_stylesheets if isinstance(s, str)]
+
+            v1_chapter = {
+                "title": ch.get("title", ""),
+                "filename": filename,
+                "content": ch.get("content_url", ""),
+                "asset_base_url": asset_base_url,
+                "images": images,
+                "stylesheets": stylesheets,
+                "site_styles": [],
+            }
+            chapters.append(v1_chapter)
+
+        # Move cover chapters to front (matches original behavior)
+        covers = [c for c in chapters if "cover" in c["filename"].lower() or "cover" in c["title"].lower()]
+        for c in covers:
+            chapters.remove(c)
+        result = covers + chapters
+
+        # Recurse if more pages
+        if response_data.get("next"):
+            next_offset = offset + len(response_data["results"])
+            result += self.get_book_chapters(offset=next_offset)
+
+        return result
 
     def get_default_cover(self):
         response = self.requests_provider(self.book_info["cover"], stream=True)
@@ -1337,7 +1480,7 @@ class SafariBooks:
         Uses atomic file writes to prevent corruption on failure.
         
         Returns tuple (success: bool, resolved_path: str or None)
-        - resolved_path is relative to OEBPS (e.g., 'Misc/font.woff2')
+        - resolved_path: path relative to OEBPS (e.g., 'Misc/font.woff2')
         """
         # Security: Validate asset path and resolve relative to OEBPS
         is_safe, resolved_path, target_dir = self._validate_asset_path(asset_path)
@@ -1667,22 +1810,26 @@ class SafariBooks:
         return r, c, mx
 
     def create_toc(self):
-        response = self.requests_provider(urljoin(self.api_url, "toc/"))
+        toc_url = self.API_V2_TOC.format(self.book_id)
+        response = self.requests_provider(toc_url)
         if response == 0:
-            self.display.exit("API: unable to retrieve book chapters. "
+            self.display.exit("API: unable to retrieve book TOC. "
                               "Don't delete any files, just run again this program"
                               " in order to complete the `.epub` creation!")
 
-        response = response.json()
+        response_data = self.safe_json_response(response, context="API (TOC)")
 
-        if not isinstance(response, list) and len(response.keys()) == 1:
+        if not isinstance(response_data, list):
             self.display.exit(
-                self.display.api_error(response) +
-                " Don't delete any files, just run again this program"
+                "API: unexpected TOC format. "
+                "Don't delete any files, just run again this program"
                 " in order to complete the `.epub` creation!"
             )
 
-        navmap, _, max_depth = self.parse_toc(response, self.filename_mapping)
+        # Reshape v2 TOC entries to v1 format for parse_toc
+        v1_toc = self._reshape_toc_v2_to_v1(response_data)
+
+        navmap, _, max_depth = self.parse_toc(v1_toc, self.filename_mapping)
         return self.TOC_NCX.format(
             (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
             max_depth,
