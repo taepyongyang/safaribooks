@@ -304,6 +304,20 @@ class SafariBooks:
             epub_path = os.path.join(self.BOOK_PATH, self.epub_filename)
             self.run_conversion(epub_path)
 
+        # Render to PDF if requested (for books with positioned layouts)
+        if getattr(args, 'pdf', False):
+            self.run_pdf_render()
+        else:
+            # Auto-detect converted PDFs and recommend --pdf
+            from pdf_renderer import is_converted_pdf
+            oebps_dir = os.path.join(self.BOOK_PATH, "OEBPS")
+            if is_converted_pdf(oebps_dir):
+                self.display.warn(
+                    "This book uses fixed-layout positioning (converted PDF).\n"
+                    "    EPUB will not render faithfully. Re-run with --pdf for proper output.\n"
+                    "    Requires: pip install playwright pypdf && playwright install chromium"
+                )
+
         self.display.unregister()
 
         if not self.display.in_error and not args.log:
@@ -1891,3 +1905,34 @@ class SafariBooks:
         except Exception as e:
             self.display.out(f"\n[!] Conversion error: {e}")
             return False
+
+    def run_pdf_render(self):
+        """Render book pages to PDF via headless Chromium.
+
+        Best for scanned/converted books where text is absolutely positioned
+        over background images (pdf2htmlEX-style content).
+        """
+        from pdf_renderer import convert_to_pdf
+
+        oebps_dir = os.path.join(self.BOOK_PATH, "OEBPS")
+        pdf_filename = self.epub_filename.replace(".epub", ".pdf")
+        output_pdf = os.path.join(self.BOOK_PATH, pdf_filename)
+
+        # Build metadata dict from book info
+        authors = self.book_info.get("authors", [])
+        if isinstance(authors, list) and authors:
+            author_str = ", ".join(
+                a.get("name", "") if isinstance(a, dict) else str(a)
+                for a in authors
+            )
+        elif isinstance(authors, str):
+            author_str = authors
+        else:
+            author_str = None
+
+        metadata = {
+            "title": self.book_title,
+            "author": author_str,
+        }
+
+        convert_to_pdf(oebps_dir, output_pdf, display=self.display, metadata=metadata)
