@@ -61,6 +61,10 @@ if __name__ == "__main__":
         "--convert", dest="convert", action='store_true',
         help="After download, run EPUB through Calibre conversion (epub→mobi→epub) to clean formatting. Requires Calibre installed."
     )
+    parser.add_argument(
+        "--pdf", dest="pdf", action='store_true',
+        help="Render book pages to PDF via headless Chromium. Best for scanned/converted books with positioned layouts (manga, art books, technical PDFs). Requires: pip install playwright pypdf && playwright install chromium"
+    )
     parser.add_argument("--help", action="help", default=argparse.SUPPRESS, help='Show this help message.')
     parser.add_argument(
         "bookid", metavar='<BOOK ID>',
