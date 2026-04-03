@@ -10,10 +10,11 @@ import tempfile
 from collections import Counter
 from html import escape
 from queue import Queue
-from random import random
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from lxml import etree, html
 
 from safaribooks_config import (
@@ -61,6 +62,7 @@ class SafariBooks:
                    " http://www.w3.org/MarkUp/SCHEMA/xhtml2.xsd\"" \
                    " xmlns:epub=\"http://www.idpf.org/2007/ops\">\n" \
                    "<head>\n" \
+                   "<title></title>\n" \
                    "{0}\n" \
                    "<style type=\"text/css\">" \
                    "body{{margin:1em;background-color:transparent!important;}}" \
@@ -75,14 +77,14 @@ class SafariBooks:
                    "</head>\n" \
                    "<body>{1}</body>\n</html>"
 
-    CONTAINER_XML = "<?xml version=\"1.0\"?>" \
+    CONTAINER_XML = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" \
                     "<container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">" \
                     "<rootfiles>" \
                     "<rootfile full-path=\"OEBPS/content.opf\" media-type=\"application/oebps-package+xml\" />" \
                     "</rootfiles>" \
                     "</container>"
 
-    # Format: ID, Title, Authors, Description, Subjects, Publisher, Rights, Date, CoverId, MANIFEST, SPINE, CoverUrl
+    # Format: ID, Title, Authors, Description, Subjects, Publisher, Rights, Date, CoverMeta, MANIFEST, SPINE, CoverUrl, Language
     CONTENT_OPF = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" \
                   "<package xmlns=\"http://www.idpf.org/2007/opf\" unique-identifier=\"bookid\" version=\"2.0\" >\n" \
                   "<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " \
@@ -93,10 +95,10 @@ class SafariBooks:
                   "{4}" \
                   "<dc:publisher>{5}</dc:publisher>\n" \
                   "<dc:rights>{6}</dc:rights>\n" \
-                  "<dc:language>en-US</dc:language>\n" \
+                  "<dc:language>{12}</dc:language>\n" \
                   "<dc:date>{7}</dc:date>\n" \
                   "<dc:identifier id=\"bookid\">{0}</dc:identifier>\n" \
-                  "<meta name=\"cover\" content=\"{8}\"/>\n" \
+                  "{8}" \
                   "</metadata>\n" \
                   "<manifest>\n" \
                   "<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\" />\n" \
@@ -107,12 +109,12 @@ class SafariBooks:
                   "</package>"
 
     # Format: ID, Depth, Title, Author, NAVMAP
-    TOC_NCX = "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\" ?>\n" \
+    TOC_NCX = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" \
               "<!DOCTYPE ncx PUBLIC \"-//NISO//DTD ncx 2005-1//EN\"" \
               " \"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd\">\n" \
               "<ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\">\n" \
               "<head>\n" \
-              "<meta content=\"ID:ISBN:{0}\" name=\"dtb:uid\"/>\n" \
+              "<meta content=\"{0}\" name=\"dtb:uid\"/>\n" \
               "<meta content=\"{1}\" name=\"dtb:depth\"/>\n" \
               "<meta content=\"0\" name=\"dtb:totalPageCount\"/>\n" \
               "<meta content=\"0\" name=\"dtb:maxPageNumber\"/>\n" \
@@ -163,6 +165,14 @@ class SafariBooks:
         self.content_url_to_filename = {}
 
         self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         if USE_PROXY:  # DEBUG
             self.session.proxies = PROXIES
             self.session.verify = False
@@ -261,6 +271,8 @@ class SafariBooks:
         self.get()
         if not self.cover:
             self.cover = self.get_default_cover() if "cover" in self.book_info else False
+
+        if self.cover:
             cover_html = self.parse_html(
                 html.fromstring("<div id=\"sbo-rt-content\"><img src=\"Images/{0}\"></div>".format(self.cover)), True
             )
@@ -273,11 +285,11 @@ class SafariBooks:
             self.filename = self.book_chapters[0]["filename"]
             self.save_page_html(cover_html)
 
-        self.css_done_queue = Queue(0) if "win" not in sys.platform else WinQueue()
+        self.css_done_queue = Queue(0) if sys.platform != "win32" else WinQueue()
         self.display.info("Downloading book CSSs... (%s files)" % len(self.css), state=True)
         self.collect_css()
         self.collect_css_assets()  # Download fonts/images referenced in CSS
-        self.images_done_queue = Queue(0) if "win" not in sys.platform else WinQueue()
+        self.images_done_queue = Queue(0) if sys.platform != "win32" else WinQueue()
         self.display.info("Downloading book images... (%s files)" % len(self.images), state=True)
         self.collect_images()
 
@@ -579,6 +591,7 @@ class SafariBooks:
             ),
             "subjects": [],
             "rights": "",
+            "language": epub_data.get("language") or "en-US",
         }
 
         # Only include "cover" key if URL is available (downstream checks key existence)
@@ -587,6 +600,8 @@ class SafariBooks:
             result["cover"] = cover_url
 
         for key, value in result.items():
+            if key == "language":
+                continue  # language has its own validated fallback above
             if value is None:
                 result[key] = 'n/a'
 
@@ -687,22 +702,64 @@ class SafariBooks:
 
     def get_html(self, url):
         response = self.requests_provider(url)
-        if response == 0 or response.status_code != 200:
-            self.display.exit(
-                "Crawler: error trying to retrieve this page: %s (%s)\n    From: %s" %
+        if response == 0:
+            self.display.error(
+                "Crawler: network error retrieving page: %s (%s)\n    From: %s" %
                 (self.filename, self.chapter_title, url)
             )
+            self.diagnostics.record_failure(
+                "chapters", self.filename, FailureCategory.NETWORK,
+                error_message="Network error", context={"url": url}
+            )
+            return None
+
+        if response.status_code in (401, 403):
+            self.display.exit(
+                "Crawler: authentication error (%d) retrieving page: %s (%s)\n    From: %s" %
+                (response.status_code, self.filename, self.chapter_title, url)
+            )
+
+        if response.status_code != 200:
+            self.display.error(
+                "Crawler: HTTP %d retrieving page: %s (%s)\n    From: %s" %
+                (response.status_code, self.filename, self.chapter_title, url)
+            )
+            self.diagnostics.record_failure(
+                "chapters", self.filename, FailureCategory.NETWORK,
+                error_message="HTTP %d" % response.status_code, context={"url": url}
+            )
+            return None
+
+        # Detect truncated preview content from expired JWT
+        # V2 API returns 200 with ~2KB preview HTML when orm-jwt expires
+        content_length = len(response.text)
+        if content_length < 3000 and "sbo-rt-content" not in response.text:
+            self.display.error(
+                "Crawler: possible expired JWT — truncated content (%d bytes) for: %s (%s)" %
+                (content_length, self.filename, self.chapter_title)
+            )
+            self.diagnostics.record_failure(
+                "chapters", self.filename, FailureCategory.VALIDATION,
+                error_message="Truncated content (%d bytes), possible expired JWT" % content_length,
+                content_sample=response.text[:500],
+                context={"url": url}
+            )
+            return None
 
         root = None
         try:
             root = html.fromstring(response.text, base_url=SAFARI_BASE_URL)
 
         except (html.etree.ParseError, html.etree.ParserError) as parsing_error:
-            self.display.error(parsing_error)
-            self.display.exit(
-                "Crawler: error trying to parse this page: %s (%s)\n    From: %s" %
-                (self.filename, self.chapter_title, url)
+            self.display.error(
+                "Crawler: error parsing page: %s (%s)\n    From: %s\n    %s" %
+                (self.filename, self.chapter_title, url, parsing_error)
             )
+            self.diagnostics.record_failure(
+                "chapters", self.filename, FailureCategory.PARSING,
+                error_message=str(parsing_error), context={"url": url}
+            )
+            return None
 
         return root
 
@@ -995,13 +1052,12 @@ class SafariBooks:
         return None
 
     def parse_html(self, root, first_page=False):
-        if random() > 0.8:
-            if len(root.xpath("//div[@class='controls']/a/text()")):
-                self.diagnostics.record_failure(
-                    "chapters", self.filename, FailureCategory.VALIDATION,
-                    error_message="Rate limit or paywall detected (controls div found)"
-                )
-                self.display.exit(self.display.api_error(" "))
+        if len(root.xpath("//div[@class='controls']/a/text()")):
+            self.diagnostics.record_failure(
+                "chapters", self.filename, FailureCategory.VALIDATION,
+                error_message="Rate limit or paywall detected (controls div found)"
+            )
+            self.display.exit(self.display.api_error(" "))
 
         book_content = root.xpath("//div[@id='sbo-rt-content']")
         if not len(book_content):
@@ -1013,10 +1069,11 @@ class SafariBooks:
                 content_sample=html_sample,
                 context={"chapter_title": self.chapter_title}
             )
-            self.display.exit(
+            self.display.error(
                 "Parser: book content's corrupted or not present: %s (%s)" %
                 (self.filename, self.chapter_title)
             )
+            return None
 
         page_css = ""
         if len(self.chapter_stylesheets):
@@ -1122,7 +1179,7 @@ class SafariBooks:
             if dirname.index(":") > 15:
                 dirname = dirname.split(":")[0]
 
-            elif "win" in sys.platform:
+            elif sys.platform == "win32":
                 dirname = dirname.replace(":", ",")
 
         for ch in ['~', '#', '%', '&', '*', '{', '}', '\\', '<', '>', '?', '/', '`', '\'', '"', '|', '+', ':']:
@@ -1273,9 +1330,17 @@ class SafariBooks:
                 self.diagnostics.record_success("chapters", self.filename, {"cached": True})
 
             else:
-                self.save_page_html(self.parse_html(self.get_html(next_chapter["content"]), first_page))
-                # Record success for downloaded chapter
-                self.diagnostics.record_success("chapters", self.filename, {"cached": False})
+                page_root = self.get_html(next_chapter["content"])
+                if page_root is not None:
+                    page_html = self.parse_html(page_root, first_page)
+                    if page_html is not None:
+                        self.save_page_html(page_html)
+                        # Record success for downloaded chapter
+                        self.diagnostics.record_success("chapters", self.filename, {"cached": False})
+                    else:
+                        self.display.error("Skipping chapter: %s (%s)" % (self.filename, self.chapter_title))
+                else:
+                    self.display.error("Skipping chapter: %s (%s)" % (self.filename, self.chapter_title))
 
             self.display.state(len_books, len_books - len(self.chapters_queue))
 
@@ -1767,10 +1832,11 @@ class SafariBooks:
             ", ".join(escape(pub.get("name", "")) for pub in self.book_info.get("publishers", [])),
             escape(self.book_info.get("rights", "")),
             self.book_info.get("issued", ""),
-            cover_manifest_id,
+            '<meta name="cover" content="{0}"/>\n'.format(cover_manifest_id) if cover_manifest_id else "",
             "\n".join(manifest),
             "\n".join(spine),
-            self.book_chapters[0]["filename"].replace(".html", ".xhtml")
+            self.book_chapters[0]["filename"].replace(".html", ".xhtml"),
+            escape(self.book_info.get("language", "en-US"))
         )
 
     @staticmethod
@@ -1847,8 +1913,8 @@ class SafariBooks:
         return self.TOC_NCX.format(
             (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
             max_depth,
-            self.book_title,
-            ", ".join(aut.get("name", "") for aut in self.book_info.get("authors", [])),
+            escape(self.book_title),
+            escape(", ".join(aut.get("name", "") for aut in self.book_info.get("authors", []))),
             navmap
         )
 
