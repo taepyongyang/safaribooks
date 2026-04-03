@@ -7,7 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections import Counter
+from collections import Counter, deque
 from html import escape
 from queue import Queue
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
@@ -229,7 +229,7 @@ class SafariBooks:
         self.book_chapters = self.fix_duplicate_filenames(self.get_book_chapters())
         self.build_filename_mapping()
 
-        self.chapters_queue = self.book_chapters[:]
+        self.chapters_queue = deque(self.book_chapters)
 
         if len(self.book_chapters) > sys.getrecursionlimit():
             sys.setrecursionlimit(len(self.book_chapters))
@@ -260,7 +260,10 @@ class SafariBooks:
         self.filename = ""
         self.chapter_stylesheets = []
         self.css = []
+        self._css_index = {}
         self.images = []
+        self._image_urls = set()
+        self._image_basenames = set()
         self.css_asset_paths = []  # Fonts and images referenced in CSS
 
         self.display.info("Downloading book contents... (%s chapters)" % len(self.book_chapters), state=True)
@@ -933,6 +936,22 @@ class SafariBooks:
         
         self.display.log(f"Built filename mapping with {len(self.filename_mapping)} entries")
 
+    def _add_image(self, full_url, basename):
+        if full_url not in self._image_urls and basename not in self._image_basenames:
+            self.images.append(full_url)
+            self._image_urls.add(full_url)
+            self._image_basenames.add(basename)
+            return True
+        return False
+
+    def _add_css(self, url):
+        if url not in self._css_index:
+            self._css_index[url] = len(self.css)
+            self.css.append(url)
+            self.diagnostics.track_detected_asset("css", url)
+            self.display.log("Crawler: found a new CSS at %s" % url)
+        return self._css_index[url]
+
     @staticmethod
     def url_is_absolute(url):
         return bool(urlparse(url).netloc)
@@ -978,8 +997,7 @@ class SafariBooks:
                             full_url = urljoin(self.current_asset_base_url, link)
                         
                         # Avoid duplicates
-                        if full_url not in self.images and image not in [u.split('/')[-1] for u in self.images]:
-                            self.images.append(full_url)
+                        if self._add_image(full_url, image):
                             self.display.log("Crawler: found additional image: %s" % image)
                     
                     return "Images/" + image
@@ -1078,13 +1096,9 @@ class SafariBooks:
         page_css = ""
         if len(self.chapter_stylesheets):
             for chapter_css_url in self.chapter_stylesheets:
-                if chapter_css_url not in self.css:
-                    self.css.append(chapter_css_url)
-                    self.diagnostics.track_detected_asset("css", chapter_css_url)
-                    self.display.log("Crawler: found a new CSS at %s" % chapter_css_url)
-
+                css_idx = self._add_css(chapter_css_url)
                 page_css += "<link href=\"Styles/Style{0:0>2}.css\" " \
-                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(self.css.index(chapter_css_url))
+                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(css_idx)
 
         stylesheet_links = root.xpath("//link[@rel='stylesheet']")
         if len(stylesheet_links):
@@ -1092,13 +1106,9 @@ class SafariBooks:
                 css_url = urljoin("https:", s.attrib["href"]) if s.attrib["href"][:2] == "//" \
                     else urljoin(self.base_url, s.attrib["href"])
 
-                if css_url not in self.css:
-                    self.css.append(css_url)
-                    self.diagnostics.track_detected_asset("css", css_url)
-                    self.display.log("Crawler: found a new CSS at %s" % css_url)
-
+                css_idx = self._add_css(css_url)
                 page_css += "<link href=\"Styles/Style{0:0>2}.css\" " \
-                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(self.css.index(css_url))
+                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(css_idx)
 
         stylesheets = root.xpath("//style")
         if len(stylesheets):
@@ -1284,7 +1294,7 @@ class SafariBooks:
 
             first_page = len_books == len(self.chapters_queue)
 
-            next_chapter = self.chapters_queue.pop(0)
+            next_chapter = self.chapters_queue.popleft()
             # Track raw chapter metadata for debugging
             self.diagnostics.track_chapter_metadata(next_chapter)
             self.chapter_title = next_chapter["title"]
@@ -1303,9 +1313,10 @@ class SafariBooks:
             if "images" in next_chapter and len(next_chapter["images"]):
                 for img_url in next_chapter['images']:
                     if api_v2_detected:
-                        self.images.append(asset_base_url + '/' + img_url)
+                        full_url = asset_base_url + '/' + img_url
                     else:
-                        self.images.append(urljoin(next_chapter['asset_base_url'], img_url))
+                        full_url = urljoin(next_chapter['asset_base_url'], img_url)
+                    self._add_image(full_url, img_url.split('/')[-1])
 
 
             # Stylesheets
@@ -1346,10 +1357,10 @@ class SafariBooks:
 
     def _thread_download_css(self, url):
         """Download a single CSS file with proper error handling."""
-        css_file = os.path.join(self.css_path, "Style{0:0>2}.css".format(self.css.index(url)))
+        css_file = os.path.join(self.css_path, "Style{0:0>2}.css".format(self._css_index[url]))
         try:
             if os.path.isfile(css_file):
-                if not self.display.css_ad_info.value and url not in self.css[:self.css.index(url)]:
+                if not self.display.css_ad_info.value:
                     self.display.info(("File `%s` already exists.\n"
                                        "    If you want to download again all the CSSs,\n"
                                        "    please delete the output directory '" + self.BOOK_PATH + "'"
@@ -1394,7 +1405,7 @@ class SafariBooks:
         image_path = os.path.join(self.images_path, image_name)
         try:
             if os.path.isfile(image_path):
-                if not self.display.images_ad_info.value and url not in self.images[:self.images.index(url)]:
+                if not self.display.images_ad_info.value:
                     self.display.info(("File `%s` already exists.\n"
                                        "    If you want to download again all the images,\n"
                                        "    please delete the output directory '" + self.BOOK_PATH + "'"
