@@ -222,14 +222,17 @@ class Display:
         self.out(f" {C_GREEN}{C_BOLD}✓{C_RESET}  Bye!\n")
 
     @staticmethod
-    def api_error(response):
+    def api_error(response, status_code=None):
         message = "API: "
         if "detail" in response and "Not found" in response["detail"]:
             message += ("book's not present in Safari Books Online.\n"
                         "    The book identifier is the digits that you can find in the URL:\n"
                         "    `" + SAFARI_BASE_URL + "/library/view/book-name/XXXXXXXXXXXXX/`")
         else:
-            os.remove(COOKIES_FILE)
+            # Only delete cookies on authentication failures, not transient errors
+            if status_code in (401, 403) or status_code is None:
+                if os.path.isfile(COOKIES_FILE):
+                    os.remove(COOKIES_FILE)
             message += ("Out-of-Session%s.\n" % (
                 " (%s)" % response["detail"]) if "detail" in response else "" +
                 C_YELLOW + "›" + C_RESET +
