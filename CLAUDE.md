@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SafariBooks is a Python CLI tool for downloading and generating EPUB files from O'Reilly Learning (Safari Books Online). Users authenticate via credentials or SSO cookies extracted from browser sessions.
+SafariBooks is a Python CLI tool for downloading and generating EPUB files from O'Reilly Learning (Safari Books Online). Authentication uses session cookies extracted from a browser — either pasted in via `sso_cookies.py`, or captured automatically by the built-in browser login (Chrome opens, you log in, cookies are pulled via DevTools).
 
-**Note**: Direct login via the script no longer works due to O'Reilly API changes. Use SSO cookie method instead.
+**Note**: Direct credential login (`--cred`/`--login`) no longer works due to O'Reilly API changes and is deprecated — passing it now falls back to browser-based cookie auth. Use the SSO cookie method.
 
 ## Development Commands
 
@@ -16,13 +16,10 @@ pip3 install -r requirements.txt
 # Or with pipenv (preferred)
 pipenv install && pipenv shell
 
-# Download a book (SSO method - most common)
+# Download a book (uses cookies.json; opens browser login if missing/expired)
 python3 safaribooks_refactored.py <BOOK_ID>
 
-# Download with credentials
-python3 safaribooks_refactored.py --cred "email:password" <BOOK_ID>
-
-# Create cookies.json from browser SSO cookies
+# Refresh cookies.json by pasting the cookie string copied from your browser
 python3 sso_cookies.py "cookie_string_from_browser"
 
 # Enable diagnostic mode for debugging incomplete downloads
@@ -48,7 +45,8 @@ ebook-convert "input.epub" "output.epub"
 ```
 CLI (safaribooks_refactored.py)
     └── SafariBooks class (safaribooks_process.py)
-            ├── Authentication → O'Reilly API
+            ├── BrowserTransport → logged-in Chrome via CDP (Akamai bypass)
+            │     └── requests_provider() routes all content GETs through fetch()
             ├── get_book_info() → Book metadata
             ├── get_book_chapters() → Chapter list (paginated API)
             ├── get() → Download all chapter HTML
@@ -70,6 +68,8 @@ CLI (safaribooks_refactored.py)
 - `link_replace()`: Rewrites HTML links using the filename mapping
 - `parse_css_for_assets()`: Extracts font/icon URLs from CSS `url()` references
 - `generate_epub_filename()`: Creates `title_author.epub` filename with safe characters
+
+**BrowserTransport** (`safaribooks_browser_transport.py`): Routes all content requests through a live logged-in Chrome via the Chrome DevTools Protocol, because Akamai Bot Manager 403s plain `requests` on content endpoints. Issues each request as an in-page `fetch()` and returns a `BrowserResponse` shim (`status_code`/`text`/`content`/`json()`/`iter_content()`) so the rest of the pipeline is unchanged. Injects saved cookies for auto-login; prompts manual login only if they're expired.
 
 **DiagnosticCollector** (`safaribooks_diagnostics.py`): Tracks download completeness when `--debug` is enabled. Compares expected vs actual counts for chapters, CSS, and images. Generates JSON report with failure details.
 
@@ -96,6 +96,8 @@ Books/<Title> (<ID>)/
 1. **Kindle flag inverted**: `--kindle` removes helpful CSS rules instead of adding them. The `KINDLE_HTML` CSS (word-wrap, pre-wrap for tables/pre) is included by DEFAULT and removed when flag is passed.
 
 2. **No horizontal scroll on Kindle**: Kindle e-readers cannot scroll horizontally. The `white-space: pre-wrap` and `word-break: break-word` rules in `KINDLE_HTML` prevent code/tables from overflowing.
+
+3. **Akamai Bot Manager (handled via browser transport)**: O'Reilly fronts its content API with Akamai, which serves `403` (`Server: AkamaiGHost`, "Access Denied") to non-browser clients — and this is **fingerprint-bound**, so no header/cookie tweak from `requests` can beat it (proven: an in-browser `fetch()` returns 200 while byte-identical cookies from `requests` return 403). This is why content is routed through `BrowserTransport` (a real logged-in Chrome). The lenient `/search` endpoint still works from plain `requests`. A content 403 is a CDN bot-block, NOT an expired session (an expired JWT instead returns a truncated 200).
 
 ## Testing
 
