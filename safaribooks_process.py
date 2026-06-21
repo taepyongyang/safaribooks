@@ -34,6 +34,7 @@ from safaribooks_display import Display
 from safaribooks_winqueue import WinQueue
 from safaribooks_diagnostics import DiagnosticCollector, FailureCategory
 from safaribooks_browser_auth import browser_login
+from safaribooks_browser_transport import BrowserTransport
 
 # HTTP timeout for all requests (prevents infinite hanging)
 REQUESTS_TIMEOUT = 30  # seconds
@@ -127,10 +128,18 @@ class SafariBooks:
     HEADERS = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": LOGIN_ENTRY_URL,
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not.A/Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
         "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/90.0.4430.212 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/126.0.0.0 Safari/537.36"
     }
 
     COOKIE_FLOAT_MAX_AGE_PATTERN = re.compile(r'(max-age=\d*\.\d*)', re.IGNORECASE)
@@ -186,35 +195,20 @@ class SafariBooks:
             self.display.out("\n[!] Note: --cred and --login are deprecated (O'Reilly API changed).")
             self.display.out("    Will use browser-based authentication instead.\n")
 
-        # Try to load existing cookies
-        cookies_loaded = False
-        if os.path.isfile(COOKIES_FILE):
-            try:
-                with open(COOKIES_FILE) as f:
-                    self.session.cookies.update(json.load(f))
-                cookies_loaded = True
-            except (json.JSONDecodeError, IOError) as e:
-                self.display.out(f"[!] Warning: Could not load cookies.json: {e}")
-
-        # Validate session if cookies were loaded
-        session_valid = False
-        if cookies_loaded:
-            self.display.info("Validating stored session...", state=True)
-            session_valid, error_msg = self.validate_session()
-            if not session_valid:
-                self.display.out(f"\n[!] Session invalid: {error_msg}")
-
-        # If no valid session, use browser login
-        if not session_valid:
-            try:
-                cookies = browser_login(COOKIES_FILE)
-                self.session.cookies.update(cookies)
-            except FileNotFoundError as e:
-                self.display.exit(f"Browser login failed: {e}")
-            except KeyboardInterrupt:
-                self.display.exit("Login cancelled.")
-            except Exception as e:
-                self.display.exit(f"Browser login error: {e}")
+        # O'Reilly's content API sits behind Akamai Bot Manager, which serves
+        # "403 AkamaiGHost" to non-browser HTTP clients (plain requests) even
+        # with a valid cookie jar. The only client that passes is a real,
+        # logged-in Chrome, so route all content requests through one via CDP.
+        # Saved cookies (if any) are injected so login is usually automatic.
+        self.browser = BrowserTransport(COOKIES_FILE, self.display)
+        try:
+            self.browser.start()
+        except KeyboardInterrupt:
+            self.browser.close()
+            self.display.exit("Login cancelled.")
+        except Exception as e:
+            self.browser.close()
+            self.display.exit(f"Browser startup failed: {e}")
 
         self.check_login()
 
@@ -300,9 +294,12 @@ class SafariBooks:
         self.create_epub()
 
         if not args.no_cookies:
-            with open(COOKIES_FILE, 'w') as f:
-                json.dump(self.session.cookies.get_dict(), f)
-            os.chmod(COOKIES_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600 - owner read/write only
+            saved = self.browser.save_cookies(COOKIES_FILE)
+            if saved:
+                self.display.info(f"Saved {saved} session cookies for next run.", state=True)
+
+        # Network work is done; release the browser session.
+        self.browser.close()
 
         # Diagnostic finalization (only when --debug enabled)
         if self.diagnostics.enabled:
@@ -346,6 +343,21 @@ class SafariBooks:
                 self.session.cookies.set(cookie_key, cookie_value)
 
     def requests_provider(self, url, is_post=False, data=None, perform_redirect=True, timeout=REQUESTS_TIMEOUT, **kwargs):
+        # Route GETs through the logged-in browser (Akamai blocks plain requests
+        # on content endpoints). fetch() follows redirects itself, so there is no
+        # redirect recursion here. POSTs (legacy login) fall through to requests.
+        browser = getattr(self, "browser", None)
+        if browser is not None and browser.active and not is_post:
+            response = browser.fetch(url, timeout=timeout)
+            if response is None:
+                return 0
+            self.display.last_request = (
+                url, data, kwargs, response.status_code,
+                "\n".join("\t{}: {}".format(k, v) for k, v in response.headers.items()),
+                response.text,
+            )
+            return response
+
         try:
             response = getattr(self.session, "post" if is_post else "get")(
                 url,
