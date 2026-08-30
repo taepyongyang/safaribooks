@@ -172,6 +172,15 @@ class BrowserTransport:
         self._navigate(HOME_URL)
 
         if not self._logged_in():
+            # The saved cookies did not yield a session, so they are stale
+            # (expired orm-jwt, dead Akamai bm_*/_abck, old csrftoken...).
+            # Left in place they make O'Reilly's sign-in silently reset to
+            # the email step, so a manual login can never succeed. Wipe them
+            # and reload the login page clean before asking the user.
+            if injected:
+                self._cmd("Network.clearBrowserCookies")
+                self.display.info("Saved cookies are stale; cleared them for a fresh login.", state=True)
+                self._navigate(HOME_URL)
             print("\n" + "=" * 60)
             print("O'REILLY LOGIN REQUIRED")
             print("=" * 60)
