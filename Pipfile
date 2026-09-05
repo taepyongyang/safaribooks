@@ -12,6 +12,7 @@ lxml = "*"
 requests = "*"
 
 [dev-packages]
+pytest = ">=8.0"
 
 
 [requires]
