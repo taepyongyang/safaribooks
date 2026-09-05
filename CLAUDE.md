@@ -78,7 +78,7 @@ register_user.py                 Legacy account-registration script; not part of
 O'Reilly's content endpoints (`/api/v2/epubs/...`, chapters, files) return `403 AkamaiGHost` to any non-browser client. This is fingerprint-bound: byte-identical cookies from `requests` still get 403 while an in-page `fetch()` returns 200. Therefore:
 
 - `requests_provider()` routes **every request** through `BrowserTransport.fetch()` and returns a `BrowserResponse` (`status_code`, `text`, `content`, `headers`, `json()`, `iter_content()`) or `None` on transport failure. There is no `requests.Session` fallback any more; callers check `is None`.
-- `fetch()` follows redirects itself, so `BrowserResponse.is_redirect` is always `False` and the redirect recursion in `requests_provider` never triggers on the browser path.
+- `fetch()` follows redirects itself, so `BrowserResponse.is_redirect` is always `False` and callers never see 3xx responses.
 - Chrome runs with a throwaway profile at `/tmp/safaribooks_chrome_profile` and `--remote-allow-origins=*`; `websocket-client` is required. `close()` is registered with `atexit` so an abort never orphans Chrome.
 - A content **403 is a bot block, not an expired session**. An expired `orm-jwt` instead returns HTTP 200 with a ~2 KB preview page; `get_html()` detects this (body < 3000 bytes with no `sbo-rt-content`) and records a `VALIDATION` failure.
 

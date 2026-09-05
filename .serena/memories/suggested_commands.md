@@ -57,5 +57,5 @@ git log --oneline -10
 
 ## Development Notes
 - No linting/formatting tools configured
-- No automated testing framework
+- Automated tests via pytest (see `tests/`)
 - Manual testing by downloading sample books and verifying EPUB output

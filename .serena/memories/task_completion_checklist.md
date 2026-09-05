@@ -8,7 +8,7 @@
 - [ ] Error handling added for network/IO operations
 - [ ] Uses existing patterns from codebase (Display class for output, etc.)
 
-### 2. Manual Testing (No Automated Tests)
+### 2. Testing (`pytest`, see `tests/`)
 - [ ] Test with a sample book ID if modifying download logic
 - [ ] Verify EPUB output if modifying generation logic
 - [ ] Test both credential and cookie authentication paths if modifying auth
@@ -30,7 +30,7 @@
 This project lacks:
 - Linting configuration (no ruff/flake8/pylint setup)
 - Type checking (no mypy, no type hints used)
-- Automated tests (no pytest/unittest)
+- Automated tests now exist via pytest (see `tests/`)
 - CI/CD pipeline
 
 Quality assurance is manual verification of functionality.

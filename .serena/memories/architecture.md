@@ -63,9 +63,8 @@ safaribooks-dev/
 ### safaribooks_config.py
 Configuration constants:
 - URL endpoints (ORLY, Safari, API origins)
-- File paths (PATH, COOKIES_FILE)
-- Regex patterns (CSRF_TOKEN_RE, CHECK_EMAIL, CHECK_PWD)
-- Debug settings (USE_PROXY, PROXIES)
+- Paths (PATH, COOKIES_FILE, CHROME_PROFILE_DIR), hosts and SAFARI_BASE_URL
+- Register/proxy constants (CSRF_TOKEN_RE, CHECK_EMAIL, CHECK_PWD, USE_PROXY, PROXIES) now live in `register_user.py`, not this module
 
 ## Data Flow
 ```
