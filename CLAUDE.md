@@ -27,10 +27,11 @@ python3 sso_cookies.py "cookie_string_from_browser"
 
 # Lint / syntax (ruff is pinned in requirements.txt; no config file, defaults apply)
 ruff check .
+pytest                    # characterization tests for the pure helpers (no network)
 python3 -m py_compile *.py
 ```
 
-No automated tests exist. Verification is manual: download a book with `--debug`, read `Books/<Title> (<ID>)/diagnostic_report_<ID>.json`, then open the EPUB in Calibre (`ebook-convert in.epub out.epub` should report no missing files).
+Unit tests in `tests/` cover the pure helpers (filename fixing, link rewriting, v2→v1 reshaping, TOC, CSS asset parsing, expired-JWT detection) by constructing `SafariBooks` via `__new__` with stub collaborators — see `tests/conftest.py`. They do not cover the browser transport or EPUB packaging; those are verified manually: download a book with `--debug`, read the diagnostic report, then open the EPUB in Calibre.
 
 ### CLI flags
 
@@ -53,10 +54,10 @@ Everything is orchestrated from `SafariBooks.__init__` in `safaribooks_process.p
 safaribooks_refactored.py        argparse → SafariBooks(args)
 safaribooks_process.py           SafariBooks: the entire pipeline (~2000 lines)
 safaribooks_browser_transport.py BrowserTransport + BrowserResponse (CDP-routed HTTP)
-safaribooks_browser_auth.py      Chrome discovery/launch with --remote-debugging-port=9222
+safaribooks_browser_auth.py      Chrome discovery/launch helpers (find_chrome_path, launch, wait for CDP)
 safaribooks_diagnostics.py       DiagnosticCollector (only active with --debug)
 safaribooks_display.py           Display: progress bar, log file, ANSI colours (C_* constants)
-safaribooks_config.py            Hosts/URLs, COOKIES_FILE, USE_PROXY
+safaribooks_config.py            Paths, hosts, SAFARI_BASE_URL, CHROME_PROFILE_DIR
 pdf_renderer.py                  --pdf implementation (Playwright); imported lazily
 sso_cookies.py                   Cookie-string → cookies.json helper
 register_user.py                 Legacy account-registration script; not part of the pipeline
@@ -76,7 +77,7 @@ register_user.py                 Legacy account-registration script; not part of
 
 O'Reilly's content endpoints (`/api/v2/epubs/...`, chapters, files) return `403 AkamaiGHost` to any non-browser client. This is fingerprint-bound: byte-identical cookies from `requests` still get 403 while an in-page `fetch()` returns 200. Therefore:
 
-- `requests_provider()` routes **every GET** through `BrowserTransport.fetch()`, which evaluates an async `fetch()` inside the page over the CDP websocket and returns a `BrowserResponse` shim (`status_code`, `text`, `content`, `headers`, `json()`, `iter_content()`). Only POSTs (legacy login path, effectively dead) fall through to `requests.Session`.
+- `requests_provider()` routes **every request** through `BrowserTransport.fetch()` and returns a `BrowserResponse` (`status_code`, `text`, `content`, `headers`, `json()`, `iter_content()`) or `None` on transport failure. There is no `requests.Session` fallback any more; callers check `is None`.
 - `fetch()` follows redirects itself, so `BrowserResponse.is_redirect` is always `False` and the redirect recursion in `requests_provider` never triggers on the browser path.
 - Chrome runs with a throwaway profile at `/tmp/safaribooks_chrome_profile` and `--remote-allow-origins=*`; `websocket-client` is required. `close()` is registered with `atexit` so an abort never orphans Chrome.
 - A content **403 is a bot block, not an expired session**. An expired `orm-jwt` instead returns HTTP 200 with a ~2 KB preview page; `get_html()` detects this (body < 3000 bytes with no `sbo-rt-content`) and records a `VALIDATION` failure.

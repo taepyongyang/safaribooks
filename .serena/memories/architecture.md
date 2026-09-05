@@ -26,8 +26,8 @@ safaribooks-dev/
 
 ### safaribooks_process.py
 **SafariBooks class** (~30+ methods):
-- Authentication: `do_login()`, `check_login()`, `parse_cred()`
-- Session management: `requests_provider()`, `handle_cookie_update()`
+- Authentication: `check_login()` (v2 search probe through the browser transport)
+- HTTP: `requests_provider()` → BrowserResponse or None
 - Book retrieval: `get_book_info()`, `get_book_chapters()` (v2 API with adapter pattern)
 - V2 helpers: `safe_json_response()`, `_extract_filename_from_reference_id()`, `_extract_href_from_reference_id()`, `_reshape_toc_v2_to_v1()`
 - Content processing: `get_html()`, `parse_html()`, `link_replace()`
