@@ -4,104 +4,114 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SafariBooks is a Python CLI tool for downloading and generating EPUB files from O'Reilly Learning (Safari Books Online). Authentication uses session cookies extracted from a browser — either pasted in via `sso_cookies.py`, or captured automatically by the built-in browser login (Chrome opens, you log in, cookies are pulled via DevTools).
+SafariBooks is a Python CLI that downloads a book from O'Reilly Learning (Safari Books Online) and assembles it into an EPUB (optionally a PDF). It is a fork of the unmaintained `lorenzodifuccia/safaribooks`, heavily reworked: the retired v1 API was replaced by v2, and all content traffic now goes through a real logged-in Chrome because O'Reilly's Akamai bot protection blocks plain `requests`.
 
-**Note**: Direct credential login (`--cred`/`--login`) no longer works due to O'Reilly API changes and is deprecated — passing it now falls back to browser-based cookie auth. Use the SSO cookie method.
+`--cred`/`--login` are deprecated and silently fall back to browser auth. Authentication is browser-based only.
 
 ## Development Commands
 
 ```bash
-# Install dependencies
+# Install (pyenv virtualenv `safaribooks` is set in .python-version; Pipfile targets 3.11)
 pip3 install -r requirements.txt
-# Or with pipenv (preferred)
-pipenv install && pipenv shell
+# or: pipenv install && pipenv shell
 
-# Download a book (uses cookies.json; opens browser login if missing/expired)
+# Download a book. Opens Chrome; auto-logs in from cookies.json, else prompts you to log in
+# and press ENTER. Must run interactively — the login prompt is a blocking input().
 python3 safaribooks_refactored.py <BOOK_ID>
 
-# Refresh cookies.json by pasting the cookie string copied from your browser
+# Debugging an incomplete download: diagnostics report + keep the log
+python3 safaribooks_refactored.py --debug --preserve-log <BOOK_ID>
+
+# Seed cookies.json manually from a cookie string copied out of the browser
 python3 sso_cookies.py "cookie_string_from_browser"
 
-# Enable diagnostic mode for debugging incomplete downloads
-python3 safaribooks_refactored.py --debug <BOOK_ID>
+# Lint / syntax (ruff is pinned in requirements.txt; no config file, defaults apply)
+ruff check .
+python3 -m py_compile *.py
 ```
 
-### CLI Options
-- `--debug`: Enable diagnostics - generates `diagnostic_report_<BOOK_ID>.json` with download completeness tracking
-- `--kindle`: **WARNING: Logic is inverted** - currently REMOVES Kindle-friendly CSS instead of adding it
-- `--no-cookies`: Don't persist session to `cookies.json`
-- `--preserve-log`: Keep log file even on success
+No automated tests exist. Verification is manual: download a book with `--debug`, read `Books/<Title> (<ID>)/diagnostic_report_<ID>.json`, then open the EPUB in Calibre (`ebook-convert in.epub out.epub` should report no missing files).
 
-### Post-Download
-Convert raw EPUB to clean format with Calibre:
-```bash
-ebook-convert "input.epub" "output.epub"
-# Or for Kindle: convert to AZW3/MOBI with "Ignore margins" option
+### CLI flags
+
+| Flag | Effect |
+|------|--------|
+| `--debug` | Enable `DiagnosticCollector`; writes `diagnostic_report_<ID>.json` and prints a completeness summary |
+| `--kindle` | Append `KINDLE_HTML` CSS (word-wrap, `pre-wrap` on tables/pre) so code doesn't overflow on e-readers |
+| `--convert` | After download, run `scripts/convert-epub.sh` (Calibre epub→mobi→epub round-trip); output `<name>.final.epub` |
+| `--pdf` | Render OEBPS to PDF via headless Chromium. Optional deps: `pip install playwright pypdf && playwright install chromium` |
+| `--no-cookies` | Don't write the browser's session cookies back to `cookies.json` at the end |
+| `--preserve-log` | Keep `info_<ID>.log`; by default it is deleted on a clean run |
+
+Book IDs must match `^[0-9]{10,13}$` (validated in `SafariBooks.__init__`).
+
+## Architecture
+
+Everything is orchestrated from `SafariBooks.__init__` in `safaribooks_process.py`; constructing the object runs the whole pipeline. There is no separate `run()`.
+
+```
+safaribooks_refactored.py        argparse → SafariBooks(args)
+safaribooks_process.py           SafariBooks: the entire pipeline (~2000 lines)
+safaribooks_browser_transport.py BrowserTransport + BrowserResponse (CDP-routed HTTP)
+safaribooks_browser_auth.py      Chrome discovery/launch with --remote-debugging-port=9222
+safaribooks_diagnostics.py       DiagnosticCollector (only active with --debug)
+safaribooks_display.py           Display: progress bar, log file, ANSI colours (C_* constants)
+safaribooks_config.py            Hosts/URLs, COOKIES_FILE, USE_PROXY
+pdf_renderer.py                  --pdf implementation (Playwright); imported lazily
+sso_cookies.py                   Cookie-string → cookies.json helper
+register_user.py                 Legacy account-registration script; not part of the pipeline
 ```
 
-## Code Architecture
+### Pipeline (order in `SafariBooks.__init__`)
 
-### Data Flow
-```
-CLI (safaribooks_refactored.py)
-    └── SafariBooks class (safaribooks_process.py)
-            ├── BrowserTransport → logged-in Chrome via CDP (Akamai bypass)
-            │     └── requests_provider() routes all content GETs through fetch()
-            ├── get_book_info() → Book metadata
-            ├── get_book_chapters() → Chapter list (paginated API)
-            ├── get() → Download all chapter HTML
-            │     └── parse_html() → Extract/rewrite content
-            │           └── link_replace() → Rewrite internal links
-            ├── collect_css() → Download stylesheets
-            │     └── collect_css_assets() → Download fonts/icons from CSS
-            ├── collect_images() → Download images
-            └── create_epub() → Generate EPUB package
-                  ├── create_content_opf() → Manifest
-                  └── create_toc() → Navigation
-```
+1. `BrowserTransport.start()` launches Chrome, injects `cookies.json`, and confirms login. If the saved cookies don't yield a session it **clears all browser cookies** before prompting for manual login (stale cookies make O'Reilly's sign-in reset silently).
+2. `check_login()` hits `API_V2_SEARCH` as a lightweight auth probe.
+3. `get_book_info()` → `get_book_chapters()` (offset pagination, 100/page, recursive) → `fix_duplicate_filenames()` → `build_filename_mapping()`.
+4. `get()` walks `chapters_queue` (a `deque`), calling `get_html()` → `parse_html()` → `link_replace()` → `save_page_html()`. Cover chapters are moved to the front; a default cover is synthesised if none was found.
+5. `collect_css()` → `collect_css_assets()` (fonts/icons referenced by `url()` in CSS) → `collect_images()`.
+6. `create_epub()` writes `mimetype`, `META-INF/container.xml`, `OEBPS/content.opf`, `OEBPS/toc.ncx`, then zips via `shutil.make_archive` and renames to `<title>_<author>.epub`.
+7. Cookies are saved back to `cookies.json` (0600), Chrome is closed, then optional `--convert` / `--pdf` post-processing. Without `--pdf`, `pdf_renderer.is_converted_pdf()` still runs to warn when a book is a fixed-layout pdf2htmlEX conversion.
 
-### Key Classes
+### Browser transport (the Akamai constraint)
 
-**SafariBooks** (`safaribooks_process.py`): Core orchestrator handling the complete download-to-EPUB pipeline. Key methods:
-- `fix_duplicate_filenames()`: Resolves duplicate chapter filenames (e.g., multiple `index.xhtml`)
-- `build_filename_mapping()`: Maps original paths to new unique filenames for internal link rewriting
-- `link_replace()`: Rewrites HTML links using the filename mapping
-- `parse_css_for_assets()`: Extracts font/icon URLs from CSS `url()` references
-- `generate_epub_filename()`: Creates `title_author.epub` filename with safe characters
+O'Reilly's content endpoints (`/api/v2/epubs/...`, chapters, files) return `403 AkamaiGHost` to any non-browser client. This is fingerprint-bound: byte-identical cookies from `requests` still get 403 while an in-page `fetch()` returns 200. Therefore:
 
-**BrowserTransport** (`safaribooks_browser_transport.py`): Routes all content requests through a live logged-in Chrome via the Chrome DevTools Protocol, because Akamai Bot Manager 403s plain `requests` on content endpoints. Issues each request as an in-page `fetch()` and returns a `BrowserResponse` shim (`status_code`/`text`/`content`/`json()`/`iter_content()`) so the rest of the pipeline is unchanged. Injects saved cookies for auto-login; prompts manual login only if they're expired.
+- `requests_provider()` routes **every GET** through `BrowserTransport.fetch()`, which evaluates an async `fetch()` inside the page over the CDP websocket and returns a `BrowserResponse` shim (`status_code`, `text`, `content`, `headers`, `json()`, `iter_content()`). Only POSTs (legacy login path, effectively dead) fall through to `requests.Session`.
+- `fetch()` follows redirects itself, so `BrowserResponse.is_redirect` is always `False` and the redirect recursion in `requests_provider` never triggers on the browser path.
+- Chrome runs with a throwaway profile at `/tmp/safaribooks_chrome_profile` and `--remote-allow-origins=*`; `websocket-client` is required. `close()` is registered with `atexit` so an abort never orphans Chrome.
+- A content **403 is a bot block, not an expired session**. An expired `orm-jwt` instead returns HTTP 200 with a ~2 KB preview page; `get_html()` detects this (body < 3000 bytes with no `sbo-rt-content`) and records a `VALIDATION` failure.
 
-**DiagnosticCollector** (`safaribooks_diagnostics.py`): Tracks download completeness when `--debug` is enabled. Compares expected vs actual counts for chapters, CSS, and images. Generates JSON report with failure details.
+### v2 API adapter pattern
 
-**Display** (`safaribooks_display.py`): Progress bars, logging, and terminal output.
+`get_book_info()`, `get_book_chapters()`, and `create_toc()` fetch v2 and reshape results into the **v1 dict shape** the rest of the code expects (`title`, `filename`, `content`, `asset_base_url`, `images` as paths relative to `API_V2_FILES`, `stylesheets` as `[{"url": ...}]`, `site_styles`). `_reshape_toc_v2_to_v1()` does the same for the TOC. When touching API code, keep that shape intact so `parse_html`, `link_replace`, `parse_toc`, and EPUB generation stay untouched.
 
-### EPUB Structure Generated
+### Things that are easy to get wrong
+
+- **Downloads are sequential by design.** `_thread_download_css/_images` are named for history but are called in a plain loop to avoid tripping bot detection. Don't parallelise.
+- **`create_content_opf()` re-reads `self.css` and `self.images` from the filesystem.** The O(1) dedup companions (`_css_index`, `_image_urls`, `_image_basenames`) are only valid during the download phase.
+- **Non-fatal chapter failures.** `get_html()` returns `None` and `get()` skips the chapter; 401/403 on a chapter is fatal. Failures are only visible in the diagnostics report or log.
+- **`display.last_request` dumps the full request/response** (including cookies) into the log on error. This is intentional for debugging; leave it.
+- **Chapter count vs recursion limit.** `get_book_chapters()` raises `sys.setrecursionlimit` to the chapter count because `parse_toc` recurses.
+- **Windows.** Platform checks use `sys.platform == "win32"` (not `"win" in sys.platform`, which matched `darwin`). `WinQueue` replaces `queue.Queue` there.
+- **pdf_renderer is imported inside methods**, not at module top, so Playwright stays optional.
+
+### Output layout
+
 ```
 Books/<Title> (<ID>)/
-├── OEBPS/
-│   ├── content.opf      # Manifest and metadata
-│   ├── toc.ncx          # Navigation
-│   ├── *.xhtml          # Chapter content
-│   ├── Styles/
-│   │   ├── Style00.css  # Stylesheets
-│   │   ├── *.ttf        # Fonts from CSS
-│   │   └── *.png        # Icons from CSS
-│   └── Images/          # Content images
+├── <title>_<author>.epub          (+ .final.epub with --convert, .pdf with --pdf)
+├── diagnostic_report_<ID>.json    (--debug only)
+├── OEBPS/  *.xhtml, content.opf, toc.ncx, Styles/ (Style00.css, fonts, icons), Images/
 ├── META-INF/container.xml
 └── mimetype
 ```
 
-## Known Issues
+Re-running on an existing directory reuses already-downloaded chapter/CSS/image files; delete the directory to force a clean fetch.
 
-1. **Kindle flag inverted**: `--kindle` removes helpful CSS rules instead of adding them. The `KINDLE_HTML` CSS (word-wrap, pre-wrap for tables/pre) is included by DEFAULT and removed when flag is passed.
+## Known EPUB compliance gaps
 
-2. **No horizontal scroll on Kindle**: Kindle e-readers cannot scroll horizontally. The `white-space: pre-wrap` and `word-break: break-word` rules in `KINDLE_HTML` prevent code/tables from overflowing.
+`shutil.make_archive` does not store `mimetype` first/uncompressed; chapter DOCTYPE is HTML5 rather than XHTML 1.1; font media types are EPUB 3 only; NCX `navPoint` ids may start with a digit. Calibre's `ebook-convert` tolerates all of these, which is why `--convert` exists.
 
-3. **Akamai Bot Manager (handled via browser transport)**: O'Reilly fronts its content API with Akamai, which serves `403` (`Server: AkamaiGHost`, "Access Denied") to non-browser clients — and this is **fingerprint-bound**, so no header/cookie tweak from `requests` can beat it (proven: an in-browser `fetch()` returns 200 while byte-identical cookies from `requests` return 403). This is why content is routed through `BrowserTransport` (a real logged-in Chrome). The lenient `/search` endpoint still works from plain `requests`. A content 403 is a CDN bot-block, NOT an expired session (an expired JWT instead returns a truncated 200).
+## Project memory
 
-## Testing
-
-No automated tests. Manual testing:
-1. Download a book with `--debug`
-2. Check `diagnostic_report_<ID>.json` for completeness
-3. Convert with `ebook-convert` and verify no missing file warnings
+`.serena/memories/` holds per-session change notes (e.g. `session_2026-02-24_v2_api_migration.md`, `session_2026-08-30_stale_cookie_login_fix.md`) with the reasoning behind non-obvious decisions. Check there before re-investigating API or auth behaviour.

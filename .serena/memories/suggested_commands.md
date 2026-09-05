@@ -13,19 +13,19 @@ pipenv install && pipenv shell
 ## Running the Application
 
 ```bash
-# Download book using email:password credentials
-python3 safaribooks_refactored.py --cred "email:password" <BOOK_ID>
-
-# Download using interactive login prompt
-python3 safaribooks_refactored.py --login <BOOK_ID>
-
-# Download using SSO cookies (requires cookies.json file)
+# Download a book (opens Chrome; auto-logs in from cookies.json, else prompts for manual login)
 python3 safaribooks_refactored.py <BOOK_ID>
+
+# With diagnostics + kept log (preferred when debugging; run interactively — login prompt is input())
+python3 safaribooks_refactored.py --debug --preserve-log <BOOK_ID>
+
+# --cred / --login are DEPRECATED (O'Reilly API changed); they fall back to browser auth
 ```
 
 ## CLI Options
-- `--cred "email:password"` - Use credentials for login
-- `--login` - Interactive login prompt
+- `--debug` - Diagnostic report (`diagnostic_report_<ID>.json`) with completeness tracking
+- `--convert` - Post-process EPUB with Calibre `ebook-convert`
+- `--pdf` - Render fixed-layout (pdf2htmlEX) books to PDF via Playwright
 - `--kindle` - Add CSS rules for Kindle compatibility
 - `--no-cookies` - Don't save session cookies
 - `--preserve-log` - Keep log files even without errors
