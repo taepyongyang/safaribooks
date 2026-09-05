@@ -33,8 +33,8 @@ REQUESTS_TIMEOUT = 30  # seconds
 class SafariBooks:
     """
     Main class for SafariBooks downloader and EPUB generator.
-    Handles authentication, session management, book info retrieval, content downloading,
-    HTML parsing, and EPUB file creation.
+    Handles browser-session startup, book info retrieval, content downloading, HTML parsing,
+    and EPUB file creation.
     """
     # V2 API endpoints (v1 retired, returns 404 for all books)
     API_V2_EPUBS    = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/"
@@ -377,8 +377,8 @@ class SafariBooks:
         return result
 
     def check_login(self):
-        # Use v2 search API to verify authentication (profile URL redirects
-        # due to Referer header set in session)
+        # Use the v2 search API as a lightweight authenticated probe, routed
+        # through the browser transport
         test_url = self.API_V2_SEARCH.format(self.book_id)
         response = self.requests_provider(test_url)
 
