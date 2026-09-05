@@ -3,14 +3,13 @@ import os
 import pathlib
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 from collections import Counter, deque
 from html import escape
 from queue import Queue
-from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -19,12 +18,9 @@ from lxml import etree, html
 
 from safaribooks_config import (
     API_ORIGIN_HOST,
-    API_ORIGIN_URL,
     COOKIES_FILE,
     ORLY_BASE_HOST,
-    ORLY_BASE_URL,
     PATH,
-    PROFILE_URL,
     PROXIES,
     SAFARI_BASE_HOST,
     SAFARI_BASE_URL,
@@ -33,7 +29,6 @@ from safaribooks_config import (
 from safaribooks_display import Display
 from safaribooks_winqueue import WinQueue
 from safaribooks_diagnostics import DiagnosticCollector, FailureCategory
-from safaribooks_browser_auth import browser_login
 from safaribooks_browser_transport import BrowserTransport
 
 # HTTP timeout for all requests (prevents infinite hanging)
@@ -46,7 +41,6 @@ class SafariBooks:
     Handles authentication, session management, book info retrieval, content downloading,
     HTML parsing, and EPUB file creation.
     """
-    LOGIN_URL = ORLY_BASE_URL + "/member/auth/login/"
     LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
 
     # V2 API endpoints (v1 retired, returns 404 for all books)
@@ -187,8 +181,6 @@ class SafariBooks:
             self.session.verify = False
 
         self.session.headers.update(self.HEADERS)
-
-        self.jwt = {}
 
         # Show deprecation warning for --cred/--login (but don't block)
         if args.cred:
@@ -453,74 +445,6 @@ class SafariBooks:
             result.append(v1_entry)
         return result
 
-    @staticmethod
-    def parse_cred(cred):
-        if ":" not in cred:
-            return False
-
-        sep = cred.index(":")
-        new_cred = ["", ""]
-        new_cred[0] = cred[:sep].strip("'").strip('"')
-        if "@" not in new_cred[0]:
-            return False
-
-        new_cred[1] = cred[sep + 1:]
-        return new_cred
-
-    def do_login(self, email, password):
-        response = self.requests_provider(self.LOGIN_ENTRY_URL)
-        if response == 0:
-            self.display.exit("Login: unable to reach Safari Books Online. Try again...")
-
-        next_parameter = None
-        try:
-            next_parameter = parse_qs(urlparse(response.request.url).query)["next"][0]
-
-        except (AttributeError, ValueError, IndexError):
-            self.display.exit("Login: unable to complete login on Safari Books Online. Try again...")
-
-        redirect_uri = API_ORIGIN_URL + quote_plus(next_parameter)
-
-        response = self.requests_provider(
-            self.LOGIN_URL,
-            is_post=True,
-            json={
-                "email": email,
-                "password": password,
-                "redirect_uri": redirect_uri
-            },
-            perform_redirect=False
-        )
-
-        if response == 0:
-            self.display.exit("Login: unable to perform auth to Safari Books Online.\n    Try again...")
-
-        if response.status_code != 200:  # TODO To be reviewed
-            try:
-                error_page = html.fromstring(response.text)
-                errors_message = error_page.xpath("//ul[@class='errorlist']//li/text()")
-                recaptcha = error_page.xpath("//div[@class='g-recaptcha']")
-                messages = (["    `%s`" % error for error in errors_message
-                             if "password" in error or "email" in error] if len(errors_message) else []) + \
-                           (["    `ReCaptcha required (wait or do logout from the website).`"] if len(
-                               recaptcha) else [])
-                self.display.exit(
-                    "Login: unable to perform auth login to Safari Books Online.\n" + self.display.SH_YELLOW +
-                    "[*]" + self.display.SH_DEFAULT + " Details:\n" + "%s" % "\n".join(
-                        messages if len(messages) else ["    Unexpected error!"])
-                )
-            except (html.etree.ParseError, html.etree.ParserError) as parsing_error:
-                self.display.error(parsing_error)
-                self.display.exit(
-                    "Login: your login went wrong and it encountered in an error"
-                    " trying to parse the login details of Safari Books Online. Try again..."
-                )
-
-        self.jwt = response.json()  # TODO: save JWT Tokens and use the refresh_token to restore user session
-        response = self.requests_provider(self.jwt["redirect_uri"])
-        if response == 0:
-            self.display.exit("Login: unable to reach Safari Books Online. Try again...")
-
     def check_login(self):
         # Use v2 search API to verify authentication (profile URL redirects
         # due to Referer header set in session)
@@ -534,39 +458,6 @@ class SafariBooks:
             self.display.exit("Authentication issue: unable to verify session (HTTP %s)." % response.status_code)
 
         self.display.info("Successfully authenticated.", state=True)
-
-    def validate_session(self) -> tuple:
-        """
-        Test if stored cookies are still valid by making a test API request.
-        Uses v2 search API as a lightweight session check (profile URL redirects
-        due to Referer header).
-
-        Returns:
-            Tuple of (is_valid: bool, error_message: str)
-        """
-        try:
-            # Use v2 search API as session check (lightweight, JSON response)
-            test_url = self.API_V2_SEARCH.format(self.book_id)
-            response = self.requests_provider(test_url, perform_redirect=False)
-
-            if response == 0:
-                return False, "Connection error"
-
-            if response.status_code == 401:
-                return False, "Session expired"
-
-            if response.status_code == 403:
-                return False, "Access forbidden"
-
-            if response.status_code != 200:
-                return False, f"HTTP {response.status_code}"
-
-            return True, ""
-
-        except requests.Timeout:
-            return False, "Connection timeout"
-        except Exception as e:
-            return False, str(e)
 
     def get_book_info(self):
         # Fetch core metadata from v2 epubs endpoint
