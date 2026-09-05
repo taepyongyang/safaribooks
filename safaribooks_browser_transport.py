@@ -30,9 +30,10 @@ from safaribooks_browser_auth import (
     wait_for_cdp_ready,
     CDP_PORT,
 )
+from safaribooks_config import ORLY_BASE_HOST, SAFARI_BASE_URL
 
-HOME_URL = "https://learning.oreilly.com/home/"
-ORIGIN = "https://learning.oreilly.com"
+HOME_URL = SAFARI_BASE_URL + "/home/"
+ORIGIN = SAFARI_BASE_URL
 
 # Runs inside the page. Fetches `url`, returns status + headers + base64 body.
 # base64 of the raw bytes works uniformly for JSON/HTML (text) and images/fonts
@@ -119,7 +120,7 @@ class BrowserTransport:
 
     def _logged_in(self):
         href = self._eval("location.href") or ""
-        return "oreilly.com" in href and "/login" not in href
+        return ORLY_BASE_HOST in href and "/login" not in href
 
     def _inject_cookies(self):
         if not os.path.isfile(self._cookies_file):
@@ -226,7 +227,7 @@ class BrowserTransport:
             res = self._cmd("Network.getAllCookies")
             cookies = res.get("result", {}).get("cookies", [])
             jar = {c["name"]: c["value"] for c in cookies
-                   if "oreilly.com" in c.get("domain", "")}
+                   if ORLY_BASE_HOST in c.get("domain", "")}
             with open(path, "w") as f:
                 json.dump(jar, f)
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600

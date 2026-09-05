@@ -15,6 +15,8 @@ from pathlib import Path
 
 import requests
 
+from safaribooks_config import CHROME_PROFILE_DIR
+
 # Configuration
 CDP_PORT = 9222
 CDP_TIMEOUT = 5  # Seconds to wait for Chrome to start
@@ -76,7 +78,7 @@ def launch_chrome_with_debugging(url: str) -> subprocess.Popen:
     chrome_path = find_chrome_path()
 
     # Use a temporary user data directory to avoid conflicts with existing Chrome
-    temp_profile = Path("/tmp/safaribooks_chrome_profile")
+    temp_profile = Path(CHROME_PROFILE_DIR)
     temp_profile.mkdir(exist_ok=True)
 
     args = [
