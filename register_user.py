@@ -2,15 +2,19 @@ import re
 
 import requests
 
-from safaribooks_config import (
-    CHECK_EMAIL,
-    CHECK_PWD,
-    CSRF_TOKEN_RE,
-    PROXIES,
-    REGISTER_URL,
-    SAFARI_BASE_URL,
-    USE_PROXY,
-)
+from safaribooks_config import SAFARI_BASE_URL
+
+# =====================
+# Registration endpoints (legacy; only this script uses them)
+# =====================
+REGISTER_URL  = f"{SAFARI_BASE_URL}/register/"
+CHECK_EMAIL   = f"{SAFARI_BASE_URL}/check-email-availability/"
+CHECK_PWD     = f"{SAFARI_BASE_URL}/check-password/"
+CSRF_TOKEN_RE = re.compile(r"(?<=name='csrfmiddlewaretoken' value=')([^']+)")
+
+# Debug proxy (e.g. mitmproxy) for this script only
+USE_PROXY = False
+PROXIES   = {"https": "https://127.0.0.1:8080"}
 
 LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
 
