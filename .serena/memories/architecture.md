@@ -36,7 +36,7 @@ safaribooks-dev/
 - Asset validation: `_validate_asset_path()`, `download_css_asset()`
 - EPUB generation: `create_content_opf()`, `create_toc()`, `create_epub()`
 - Post-processing: `run_conversion()` (--convert), `run_pdf_render()` (--pdf)
-- Threading: `_thread_download_css()`, `_thread_download_images()`
+- Per-asset downloaders: `_thread_download_css()`, `_thread_download_images()` (named for history; called sequentially)
 
 ### safaribooks_display.py
 **Display class** + module-level color constants (C_RESET, C_BOLD, C_CYAN, etc.):
@@ -83,7 +83,7 @@ Configuration constants:
 - Single class (SafariBooks) orchestrates entire workflow
 - Display class handles all user-facing output with ANSI colors
 - Configuration externalized to separate module
-- Multi-threaded downloads for CSS and images
+- Sequential downloads for CSS and images (bot-detection avoidance)
 - V2 API adapter pattern: only fetch methods changed, all downstream code unchanged
 - Platform-specific handling (WinQueue for Windows)
 

@@ -16,7 +16,7 @@ SafariBooks is a Python CLI tool for downloading and generating EPUB files from 
 - Browser-routed transport (Chrome via CDP) — Akamai bypass; auto-login from saved cookies, manual login fallback
 - SSO cookie support for enterprise/university logins (`sso_cookies.py`)
 - Kindle-compatible CSS option (`--kindle` appends KINDLE_HTML; the earlier inversion bug is fixed)
-- Multi-threaded CSS/image downloads
+- Sequential CSS/image downloads (by design — avoids Akamai bot detection)
 - CSS asset downloading (fonts, icons referenced in stylesheets)
 - EPUB generation with proper metadata
 - Diagnostic system (--debug flag) for tracking download completeness
@@ -26,7 +26,7 @@ SafariBooks is a Python CLI tool for downloading and generating EPUB files from 
 - Downloads copyrighted content - use only in compliance with O'Reilly Terms of Service
 - Session cookies persisted in `cookies.json`
 - Books saved to `Books/` directory
-- No formal test suite exists
+- Unit tests in `tests/` (pytest, 47 tests; see `mem:session_2026-09-05_structural_cleanup`); browser transport and EPUB packaging are verified manually
 
 ## Recent Improvements (2026-02-24)
 - Migrated from retired v1 API to v2 API using adapter pattern (all changes in safaribooks_process.py)
