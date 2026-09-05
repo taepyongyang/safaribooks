@@ -11,9 +11,6 @@ from html import escape
 from queue import Queue
 from urllib.parse import urljoin, urlparse
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from lxml import etree, html
 
 from safaribooks_config import (
@@ -21,10 +18,8 @@ from safaribooks_config import (
     COOKIES_FILE,
     ORLY_BASE_HOST,
     PATH,
-    PROXIES,
     SAFARI_BASE_HOST,
     SAFARI_BASE_URL,
-    USE_PROXY,
 )
 from safaribooks_display import Display
 from safaribooks_winqueue import WinQueue
@@ -41,8 +36,6 @@ class SafariBooks:
     Handles authentication, session management, book info retrieval, content downloading,
     HTML parsing, and EPUB file creation.
     """
-    LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
-
     # V2 API endpoints (v1 retired, returns 404 for all books)
     API_V2_EPUBS    = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/"
     API_V2_CHAPTERS = SAFARI_BASE_URL + "/api/v2/epub-chapters/?epub_identifier=urn:orm:book:{0}&limit=100&offset={1}"
@@ -119,25 +112,6 @@ class SafariBooks:
               "<navMap>{4}</navMap>\n" \
               "</ncx>"
 
-    HEADERS = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": LOGIN_ENTRY_URL,
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-User": "?1",
-        "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not.A/Brand";v="24"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"macOS"',
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/126.0.0.0 Safari/537.36"
-    }
-
-    COOKIE_FLOAT_MAX_AGE_PATTERN = re.compile(r'(max-age=\d*\.\d*)', re.IGNORECASE)
-
     # Valid book ID patterns: ISBN-10, ISBN-13, or O'Reilly internal IDs
     BOOK_ID_PATTERN = re.compile(r'^[0-9]{10,13}$')
 
@@ -166,21 +140,6 @@ class SafariBooks:
         # Initialize filename mapping (populated by build_filename_mapping)
         self.filename_mapping = {}
         self.content_url_to_filename = {}
-
-        self.session = requests.Session()
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=0.5,
-            status_forcelist=[500, 502, 503, 504],
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
-        if USE_PROXY:  # DEBUG
-            self.session.proxies = PROXIES
-            self.session.verify = False
-
-        self.session.headers.update(self.HEADERS)
 
         # Show deprecation warning for --cred/--login (but don't block)
         if args.cred:
@@ -327,54 +286,26 @@ class SafariBooks:
         if not self.display.in_error and not args.log:
             os.remove(self.display.log_file)
 
-    def handle_cookie_update(self, set_cookie_headers):
-        for morsel in set_cookie_headers:
-            # Handle Float 'max-age' Cookie
-            if self.COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
-                cookie_key, cookie_value = morsel.split(";")[0].split("=")
-                self.session.cookies.set(cookie_key, cookie_value)
+    def requests_provider(self, url, timeout=REQUESTS_TIMEOUT):
+        """Fetch `url` through the logged-in browser.
 
-    def requests_provider(self, url, is_post=False, data=None, perform_redirect=True, timeout=REQUESTS_TIMEOUT, **kwargs):
-        # Route GETs through the logged-in browser (Akamai blocks plain requests
-        # on content endpoints). fetch() follows redirects itself, so there is no
-        # redirect recursion here. POSTs (legacy login) fall through to requests.
-        browser = getattr(self, "browser", None)
-        if browser is not None and browser.active and not is_post:
-            response = browser.fetch(url, timeout=timeout)
-            if response is None:
-                return 0
-            self.display.last_request = (
-                url, data, kwargs, response.status_code,
-                "\n".join("\t{}: {}".format(k, v) for k, v in response.headers.items()),
-                response.text,
-            )
-            return response
+        Returns a BrowserResponse, or None if the transport is not active or the
+        in-page fetch() failed (the transport has already logged the error).
+        fetch() follows redirects itself, so callers never see 3xx responses.
+        """
+        if self.browser is None or not self.browser.active:
+            self.display.error("Browser transport not active; cannot fetch %s" % url)
+            return None
 
-        try:
-            response = getattr(self.session, "post" if is_post else "get")(
-                url,
-                data=data,
-                allow_redirects=False,
-                timeout=timeout,
-                **kwargs
-            )
+        response = self.browser.fetch(url, timeout=timeout)
+        if response is None:
+            return None
 
-            self.handle_cookie_update(response.raw.headers.getlist("Set-Cookie"))
-
-            self.display.last_request = (
-                url, data, kwargs, response.status_code, "\n".join(
-                    ["\t{}: {}".format(*h) for h in response.headers.items()]
-                ), response.text
-            )
-
-        except (requests.ConnectionError, requests.ConnectTimeout, requests.RequestException) as request_exception:
-            self.display.error(str(request_exception))
-            return 0
-
-        if response.is_redirect and perform_redirect:
-            return self.requests_provider(response.next.url, is_post, None, perform_redirect)
-            # TODO How about **kwargs?
-
+        self.display.last_request = (
+            url, None, {}, response.status_code,
+            "\n".join("\t{}: {}".format(k, v) for k, v in response.headers.items()),
+            response.text,
+        )
         return response
 
     def safe_json_response(self, response, context="API"):
@@ -449,9 +380,9 @@ class SafariBooks:
         # Use v2 search API to verify authentication (profile URL redirects
         # due to Referer header set in session)
         test_url = self.API_V2_SEARCH.format(self.book_id)
-        response = self.requests_provider(test_url, perform_redirect=False)
+        response = self.requests_provider(test_url)
 
-        if response == 0:
+        if response is None:
             self.display.exit("Login: unable to reach Safari Books Online. Try again...")
 
         elif response.status_code != 200:
@@ -463,7 +394,7 @@ class SafariBooks:
         # Fetch core metadata from v2 epubs endpoint
         epubs_url = self.API_V2_EPUBS.format(self.book_id)
         response = self.requests_provider(epubs_url)
-        if response == 0:
+        if response is None:
             self.display.exit("API: unable to retrieve book info.")
 
         epub_data = self.safe_json_response(response, context="API (book info)")
@@ -474,7 +405,7 @@ class SafariBooks:
         search_url = self.API_V2_SEARCH.format(self.book_id)
         search_response = self.requests_provider(search_url)
         search_data = {}
-        if search_response != 0:
+        if search_response is not None:
             search_json = self.safe_json_response(search_response, context="API (search)")
             if isinstance(search_json, dict) and search_json.get("results"):
                 search_data = search_json["results"][0]
@@ -519,7 +450,7 @@ class SafariBooks:
 
         chapters_url = self.API_V2_CHAPTERS.format(self.book_id, offset)
         response = self.requests_provider(chapters_url)
-        if response == 0:
+        if response is None:
             self.diagnostics.track_pagination(page_num, success=False, error="API request failed")
             self.diagnostics.record_failure(
                 "chapters", chapters_url, FailureCategory.NETWORK,
@@ -594,8 +525,8 @@ class SafariBooks:
         return result
 
     def get_default_cover(self):
-        response = self.requests_provider(self.book_info["cover"], stream=True)
-        if response == 0:
+        response = self.requests_provider(self.book_info["cover"])
+        if response is None:
             self.display.error("Error trying to retrieve the cover: %s" % self.book_info["cover"])
             return False
 
@@ -608,7 +539,7 @@ class SafariBooks:
 
     def get_html(self, url):
         response = self.requests_provider(url)
-        if response == 0:
+        if response is None:
             self.display.error(
                 "Crawler: network error retrieving page: %s (%s)\n    From: %s" %
                 (self.filename, self.chapter_title, url)
@@ -1274,8 +1205,8 @@ class SafariBooks:
                 self.diagnostics.record_success("css", url, {"cached": True})
 
             else:
-                response = self.requests_provider(url, stream=True)
-                if response == 0:
+                response = self.requests_provider(url)
+                if response is None:
                     # Record failure with context
                     self.diagnostics.record_failure(
                         "css", url, FailureCategory.NETWORK,
@@ -1319,8 +1250,8 @@ class SafariBooks:
                 self.diagnostics.record_success("images", url, {"cached": True})
 
             else:
-                response = self.requests_provider(urljoin(SAFARI_BASE_URL, url), stream=True)
-                if response == 0:
+                response = self.requests_provider(urljoin(SAFARI_BASE_URL, url))
+                if response is None:
                     # Record failure with context
                     self.diagnostics.record_failure(
                         "images", url, FailureCategory.NETWORK,
@@ -1508,8 +1439,8 @@ class SafariBooks:
             return False, None
 
         # Download the asset
-        response = self.requests_provider(asset_url, stream=True)
-        if response == 0:
+        response = self.requests_provider(asset_url)
+        if response is None:
             self.display.log(f"Failed to download CSS asset: {asset_path} from {asset_url}")
             return False, None
 
@@ -1806,7 +1737,7 @@ class SafariBooks:
     def create_toc(self):
         toc_url = self.API_V2_TOC.format(self.book_id)
         response = self.requests_provider(toc_url)
-        if response == 0:
+        if response is None:
             self.display.exit("API: unable to retrieve book TOC. "
                               "Don't delete any files, just run again this program"
                               " in order to complete the `.epub` creation!")

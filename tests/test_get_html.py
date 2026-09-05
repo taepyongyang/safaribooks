@@ -32,5 +32,5 @@ def test_get_html_other_http_error_is_skipped(sb):
 
 
 def test_get_html_transport_failure_returns_none(sb):
-    sb.requests_provider = lambda url, **kw: 0  # Task 9 changes this sentinel to None
+    sb.requests_provider = lambda url, **kw: None
     assert sb.get_html("https://x/ch1.html") is None
