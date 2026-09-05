@@ -1,3 +1,5 @@
+import re
+
 import requests
 
 from safaribooks_config import (
@@ -6,9 +8,30 @@ from safaribooks_config import (
     CSRF_TOKEN_RE,
     PROXIES,
     REGISTER_URL,
+    SAFARI_BASE_URL,
     USE_PROXY,
 )
-from safaribooks_process import SafariBooks
+
+LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
+
+HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": LOGIN_ENTRY_URL,
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not.A/Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "Upgrade-Insecure-Requests": "1",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/126.0.0.0 Safari/537.36"
+}
+
+COOKIE_FLOAT_MAX_AGE_PATTERN = re.compile(r'(max-age=\d*\.\d*)', re.IGNORECASE)
 
 
 class Register:
@@ -27,7 +50,7 @@ class Register:
             self.session.proxies = PROXIES
             self.session.verify = False
 
-        self.session.headers.update(SafariBooks.HEADERS)
+        self.session.headers.update(HEADERS)
         self.session.headers.update({
             "X-Requested-With": "XMLHttpRequest",
             "Referer": REGISTER_URL
@@ -38,7 +61,7 @@ class Register:
     def handle_cookie_update(self, set_cookie_headers):
         for morsel in set_cookie_headers:
             # Handle Float 'max-age' Cookie
-            if SafariBooks.COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
+            if COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
                 cookie_key, cookie_value = morsel.split(";")[0].split("=")
                 self.session.cookies.set(cookie_key, cookie_value)
 
