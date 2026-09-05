@@ -530,7 +530,14 @@ class SafariBooks:
             self.display.error("Error trying to retrieve the cover: %s" % self.book_info["cover"])
             return False
 
-        file_ext = response.headers["Content-Type"].split("/")[-1]
+        # BrowserResponse headers come from fetch(), which lowercases names;
+        # tolerate either casing and fall back to JPEG if the header is absent.
+        content_type = (
+            response.headers.get("content-type")
+            or response.headers.get("Content-Type")
+            or "image/jpeg"
+        )
+        file_ext = content_type.split("/")[-1]
         with open(os.path.join(self.images_path, "default_cover." + file_ext), 'wb') as i:
             for chunk in response.iter_content(1024):
                 i.write(chunk)
