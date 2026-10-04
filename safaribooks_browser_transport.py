@@ -162,7 +162,10 @@ class BrowserTransport:
 
         targets = requests.get(f"http://localhost:{CDP_PORT}/json", timeout=5).json()
         page = next((t for t in targets if t.get("type") == "page"), targets[0])
-        self._ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=90)
+        # No Origin header: Chrome accepts origin-less DevTools connections
+        # without --remote-allow-origins, which stays off so web pages can't connect.
+        self._ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=90,
+                                               suppress_origin=True)
         self._cmd("Page.enable")
         self._cmd("Network.enable")
         self._cmd("Runtime.enable")
