@@ -77,14 +77,19 @@ def launch_chrome_with_debugging(url: str) -> subprocess.Popen:
     """
     chrome_path = find_chrome_path()
 
-    # Use a temporary user data directory to avoid conflicts with existing Chrome
+    # Use a dedicated user data directory to avoid conflicts with existing Chrome.
+    # It holds live session cookies, so keep it (and its parent) private to the user.
     temp_profile = Path(CHROME_PROFILE_DIR)
-    temp_profile.mkdir(exist_ok=True)
+    temp_profile.mkdir(parents=True, exist_ok=True)
+    for d in (temp_profile.parent, temp_profile):
+        os.chmod(d, 0o700)
 
+    # No --remote-allow-origins: Chrome then refuses DevTools websocket
+    # connections from any web page (browsers always send an Origin header).
+    # The transport connects with suppress_origin=True, which Chrome accepts.
     args = [
         chrome_path,
         f"--remote-debugging-port={CDP_PORT}",
-        "--remote-allow-origins=*",  # Allow WebSocket connections from localhost
         f"--user-data-dir={temp_profile}",
         "--no-first-run",
         "--no-default-browser-check",

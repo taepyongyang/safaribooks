@@ -8,7 +8,9 @@ COOKIES_FILE = os.path.join(PATH, "cookies.json")
 
 # Throwaway Chrome profile used by the browser transport. Kept outside the
 # repo and outside the user's real Chrome profile so the two never collide.
-CHROME_PROFILE_DIR = "/tmp/safaribooks_chrome_profile"
+# It holds live O'Reilly session cookies, so it lives under the user's home
+# (not world-readable /tmp); launch_chrome_with_debugging() forces it to 0700.
+CHROME_PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "safaribooks", "chrome_profile")
 
 # =====================
 # Host & URL Constants
