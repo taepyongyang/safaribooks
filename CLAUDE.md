@@ -122,3 +122,30 @@ Re-running on an existing directory reuses already-downloaded chapter/CSS/image 
 ## Project memory
 
 `.serena/memories/` holds per-session change notes (e.g. `session_2026-02-24_v2_api_migration.md`, `session_2026-08-30_stale_cookie_login_fix.md`) with the reasoning behind non-obvious decisions. Check there before re-investigating API or auth behaviour.
+
+## Writing style
+
+Use Simplified Technical English (STE, ASD-STE100) for all new text in this repository. Load the `simplified-technical-english` skill before you write.
+
+Apply STE to:
+
+- Documentation: `README.md`, `CLAUDE.md`, and the notes in `.serena/memories/`
+- Commit messages and pull request descriptions
+- Code comments and docstrings
+- Messages that the CLI shows to the user
+
+Do not apply STE to:
+
+- Code, identifiers, commands, file paths, and flags
+- Quoted error messages and quoted API responses
+- Text that you do not change
+
+When you change a paragraph, write the full paragraph again in STE.
+
+Before you commit a text change, do a check of the file:
+
+```bash
+python3 ~/.claude/skills/simplified-technical-english/scripts/ste_check.py --mode descriptive <file>
+```
+
+The tool cannot find all errors. Also compare your words with the approved word list of the skill.
