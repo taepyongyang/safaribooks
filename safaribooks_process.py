@@ -29,6 +29,33 @@ from safaribooks_browser_transport import BrowserTransport
 # HTTP timeout for all requests (prevents infinite hanging)
 REQUESTS_TIMEOUT = 30  # seconds
 
+# EPUB manifest media types, by lowercase file extension
+MEDIA_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "svg": "image/svg+xml",
+    "webp": "image/webp",
+    "ttf": "font/ttf",
+    "otf": "font/otf",
+    "woff": "font/woff",
+    "woff2": "font/woff2",
+    "eot": "application/vnd.ms-fontobject",
+}
+
+
+def image_manifest_id(filename):
+    """Return the manifest id of an image file in OEBPS/Images.
+
+    The id keeps the extension, and dots in the base name become "_".
+    Thus "11.9.png" and "119.png" get different ids.
+    """
+    parts = filename.rsplit(".", 1)
+    if len(parts) == 2:
+        return "img_" + escape(parts[0].replace(".", "_")) + "_" + escape(parts[1])
+    return "img_" + escape(filename)
+
 
 class SafariBooks:
     """
@@ -529,6 +556,9 @@ class SafariBooks:
         if response is None:
             self.display.error("Error trying to retrieve the cover: %s" % self.book_info["cover"])
             return False
+        if response.status_code != 200:
+            self.display.error("Cannot get the cover (HTTP %d): %s" % (response.status_code, self.book_info["cover"]))
+            return False
 
         # BrowserResponse headers come from fetch(), which lowercases names;
         # tolerate either casing and fall back to JPEG if the header is absent.
@@ -537,7 +567,11 @@ class SafariBooks:
             or response.headers.get("Content-Type")
             or "image/jpeg"
         )
-        file_ext = content_type.split("/")[-1]
+        # Remove parameters such as "; charset=binary". Use only the first part
+        # of a structured subtype, thus "svg+xml" becomes "svg". If the type is
+        # not an image, use JPEG.
+        main_type, _, subtype = content_type.split(";")[0].strip().lower().partition("/")
+        file_ext = subtype.split("+")[0] if main_type == "image" and subtype else "jpeg"
         with open(os.path.join(self.images_path, "default_cover." + file_ext), 'wb') as i:
             for chunk in response.iter_content(1024):
                 i.write(chunk)
@@ -832,7 +866,11 @@ class SafariBooks:
                     # Add to download queue if not already present
                     # Construct full URL using current chapter's asset base
                     if hasattr(self, 'current_asset_base_url'):
-                        if self.current_api_v2_detected:
+                        files_path = urlparse(self.current_asset_base_url).path + '/'
+                        if self.current_api_v2_detected and link.startswith(files_path):
+                            # The link already contains the full files path, thus add only the host
+                            full_url = urljoin(self.current_asset_base_url, link)
+                        elif self.current_api_v2_detected:
                             full_url = self.current_asset_base_url + '/' + link.lstrip('/')
                         else:
                             full_url = urljoin(self.current_asset_base_url, link)
@@ -1222,6 +1260,16 @@ class SafariBooks:
                     self.display.error("Error trying to retrieve this CSS: %s\n    From: %s" % (css_file, url))
                     return  # Exit but finally block will update queue
 
+                # Do not save an error body as a CSS file
+                if response.status_code != 200:
+                    self.diagnostics.record_failure(
+                        "css", url, FailureCategory.MISSING_CONTENT,
+                        status_code=response.status_code,
+                        error_message=f"HTTP {response.status_code} for CSS: {css_file}"
+                    )
+                    self.display.error("Cannot get this CSS (HTTP %d): %s\n    From: %s" % (response.status_code, css_file, url))
+                    return  # Exit but finally block will update queue
+
                 with open(css_file, 'wb') as s:
                     for chunk in response.iter_content(1024):
                         s.write(chunk)
@@ -1265,6 +1313,16 @@ class SafariBooks:
                         error_message=f"Error retrieving image: {image_name}"
                     )
                     self.display.error("Error trying to retrieve this image: %s\n    From: %s" % (image_name, url))
+                    return  # Exit but finally block will update queue
+
+                # Do not save an error body as an image file
+                if response.status_code != 200:
+                    self.diagnostics.record_failure(
+                        "images", url, FailureCategory.MISSING_CONTENT,
+                        status_code=response.status_code,
+                        error_message=f"HTTP {response.status_code} for image: {image_name}"
+                    )
+                    self.display.error("Cannot get this image (HTTP %d): %s\n    From: %s" % (response.status_code, image_name, url))
                     return  # Exit but finally block will update queue
 
                 with open(image_path, 'wb') as img:
@@ -1450,6 +1508,9 @@ class SafariBooks:
         if response is None:
             self.display.log(f"Failed to download CSS asset: {asset_path} from {asset_url}")
             return False, None
+        if response.status_code != 200:
+            self.display.log(f"Cannot get CSS asset (HTTP {response.status_code}): {asset_path} from {asset_url}")
+            return False, None
 
         # Atomic write: Write to temp file first, then rename on success
         temp_file_path = None
@@ -1582,17 +1643,8 @@ class SafariBooks:
         # Track manifest IDs to detect duplicates
         seen_image_ids = {}
         for i in set(self.images):
-            # Use rsplit to split only on last dot, preserving dots in filename
-            # This prevents ID collisions between e.g., "11.9.png" and "119.png"
-            parts = i.rsplit(".", 1)
-            if len(parts) == 2:
-                base_name = parts[0].replace(".", "_")
-                extension = parts[1]
-                head = "img_" + escape(base_name) + "_" + escape(extension)
-            else:
-                # No extension (shouldn't happen for valid images)
-                extension = ""
-                head = "img_" + escape(i)
+            head = image_manifest_id(i)
+            extension = i.rsplit(".", 1)[1].lower() if "." in i else ""
 
             # Check for duplicate manifest IDs (shouldn't happen now with extension in ID)
             if head in seen_image_ids:
@@ -1601,8 +1653,8 @@ class SafariBooks:
                 continue
             seen_image_ids[head] = i
 
-            manifest.append("<item id=\"{0}\" href=\"Images/{1}\" media-type=\"image/{2}\" />".format(
-                head, i, "jpeg" if "jp" in extension else extension
+            manifest.append("<item id=\"{0}\" href=\"Images/{1}\" media-type=\"{2}\" />".format(
+                head, i, MEDIA_TYPES.get(extension, "image/" + extension)
             ))
 
         for i in range(len(self.css)):
@@ -1625,26 +1677,7 @@ class SafariBooks:
 
             # Determine media type based on extension
             ext = asset_path.split('.')[-1].lower()
-            if ext == 'ttf':
-                media_type = 'font/ttf'
-            elif ext == 'otf':
-                media_type = 'font/otf'
-            elif ext == 'woff':
-                media_type = 'font/woff'
-            elif ext == 'woff2':
-                media_type = 'font/woff2'
-            elif ext == 'eot':
-                media_type = 'application/vnd.ms-fontobject'
-            elif ext == 'png':
-                media_type = 'image/png'
-            elif ext in ('jpg', 'jpeg'):
-                media_type = 'image/jpeg'
-            elif ext == 'gif':
-                media_type = 'image/gif'
-            elif ext == 'svg':
-                media_type = 'image/svg+xml'
-            else:
-                media_type = 'application/octet-stream'
+            media_type = MEDIA_TYPES.get(ext, 'application/octet-stream')
 
             # asset_path is already relative to OEBPS, use directly
             manifest.append("<item id=\"{0}\" href=\"{1}\" media-type=\"{2}\" />".format(
@@ -1665,11 +1698,8 @@ class SafariBooks:
         if self.cover:
             # Extract just the filename (in case it has Images/ prefix)
             cover_filename = self.cover.split("/")[-1] if "/" in str(self.cover) else str(self.cover)
-            # Generate ID same way as image manifest entries: img_ + base name + extension
-            cover_parts = cover_filename.split(".")
-            cover_base = "".join(cover_parts[:-1])
-            cover_ext = cover_parts[-1] if len(cover_parts) > 1 else ""
-            cover_manifest_id = "img_" + escape(cover_base) + "_" + escape(cover_ext)
+            # Use the same id as the image manifest entry
+            cover_manifest_id = image_manifest_id(cover_filename)
 
             # Debug logging for cover manifest ID
             if self.debug:

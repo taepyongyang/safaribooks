@@ -47,3 +47,9 @@ def test_unknown_chapter_link_falls_back_to_xhtml(linker):
 def test_cover_xhtml_is_not_treated_as_image(linker):
     assert linker.link_replace("cover.xhtml") == "cover.xhtml"
     assert linker.images == []
+
+
+def test_root_absolute_files_link_is_not_doubled(linker):
+    link = "/api/v2/epubs/urn:orm:book:9781234567890/files/html/images/modules.svg"
+    assert linker.link_replace(link) == "Images/modules.svg"
+    assert linker.images == [FILES + "/html/images/modules.svg"]
