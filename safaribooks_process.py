@@ -1225,6 +1225,9 @@ class SafariBooks:
                          % self.filename.replace(".html", ".xhtml")
                     )
                     self.display.book_ad_info = True
+                # A cached chapter is not parsed, so register its stylesheets here.
+                for css_url in self.chapter_stylesheets:
+                    self._add_css(css_url)
                 # Record success for cached chapter
                 self.diagnostics.record_success("chapters", self.filename, {"cached": True})
 
