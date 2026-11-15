@@ -377,6 +377,14 @@ class SafariBooks:
         return ref_id.split("/")[-1] or "unknown.html"
 
     @staticmethod
+    def _is_cover_chapter(filename, title):
+        """Return True for a real cover chapter, not for a chapter that only mentions a cover."""
+        stem = filename.rsplit(".", 1)[0]
+        if re.fullmatch(r"[\d_-]*(front)?cover", stem, re.IGNORECASE):
+            return True
+        return title.strip().lower() in ("cover", "front cover")
+
+    @staticmethod
     def _extract_href_from_reference_id(ref_id):
         """Extract path from v2 reference_id for TOC href mapping.
         '9781234567890-/Text/preface.html' -> 'Text/preface.html'
@@ -540,7 +548,7 @@ class SafariBooks:
             chapters.append(v1_chapter)
 
         # Move cover chapters to front (matches original behavior)
-        covers = [c for c in chapters if "cover" in c["filename"].lower() or "cover" in c["title"].lower()]
+        covers = [c for c in chapters if self._is_cover_chapter(c["filename"], c["title"])]
         for c in covers:
             chapters.remove(c)
         result = covers + chapters
