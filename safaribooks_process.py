@@ -1641,6 +1641,10 @@ class SafariBooks:
                     self.display.log(f"WARNING: Duplicate chapter filename: {c['filename']} (title: {c.get('title', 'N/A')})")
                 continue
 
+            # A failed download leaves no file. Do not refer to it.
+            if not os.path.isfile(os.path.join(self.BOOK_PATH, "OEBPS", c["filename"])):
+                continue
+
             seen_chapter_ids[item_id] = c["filename"]
             seen_chapter_files[c["filename"]] = item_id
 
@@ -1726,15 +1730,14 @@ class SafariBooks:
             '<meta name="cover" content="{0}"/>\n'.format(cover_manifest_id) if cover_manifest_id else "",
             "\n".join(manifest),
             "\n".join(spine),
-            self.book_chapters[0]["filename"].replace(".html", ".xhtml"),
+            next(iter(seen_chapter_files), self.book_chapters[0]["filename"]),
             escape(self.book_info.get("language", "en-US"))
         )
 
     @staticmethod
-    def parse_toc(toc_list, filename_mapping=None, c=0, mx=0):
+    def parse_toc(toc_list, filename_mapping=None, c=0, mx=0, existing=None):
         r = ""
         for cc in toc_list:
-            c += 1
             if int(cc["depth"]) > mx:
                 mx = int(cc["depth"])
 
@@ -1765,6 +1768,14 @@ class SafariBooks:
                         resolved_filename = filename_mapping[clean_pattern]
                         break
             
+            if existing is not None and resolved_filename not in existing:
+                # Chapter file is missing: keep the children, drop this entry.
+                if cc["children"]:
+                    sr, c, mx = SafariBooks.parse_toc(cc["children"], filename_mapping, c, mx, existing)
+                    r += sr
+                continue
+
+            c += 1
             r += "<navPoint id=\"{0}\" playOrder=\"{1}\">" \
                  "<navLabel><text>{2}</text></navLabel>" \
                  "<content src=\"{3}\"/>".format(
@@ -1773,7 +1784,7 @@ class SafariBooks:
                  )
 
             if cc["children"]:
-                sr, c, mx = SafariBooks.parse_toc(cc["children"], filename_mapping, c, mx)
+                sr, c, mx = SafariBooks.parse_toc(cc["children"], filename_mapping, c, mx, existing)
                 r += sr
 
             r += "</navPoint>\n"
@@ -1800,7 +1811,8 @@ class SafariBooks:
         # Reshape v2 TOC entries to v1 format for parse_toc
         v1_toc = self._reshape_toc_v2_to_v1(response_data)
 
-        navmap, _, max_depth = self.parse_toc(v1_toc, self.filename_mapping)
+        existing = {f for f in os.listdir(os.path.join(self.BOOK_PATH, "OEBPS")) if f.endswith(".xhtml")}
+        navmap, _, max_depth = self.parse_toc(v1_toc, self.filename_mapping, existing=existing)
         return self.TOC_NCX.format(
             (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
             max_depth,

@@ -14,6 +14,8 @@ def _opf(sb, images, cover):
     sb.book_title = "Test Book"
     sb.book_info = {}
     sb.book_chapters = [{"filename": "ch01.html", "title": "Chapter 1"}]
+    with open(os.path.join(sb.BOOK_PATH, "OEBPS", "ch01.xhtml"), "w") as f:
+        f.write("<html/>")
     return sb.create_content_opf()
 
 
