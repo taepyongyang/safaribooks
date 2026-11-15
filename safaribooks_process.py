@@ -893,7 +893,7 @@ class SafariBooks:
                             full_url = urljoin(self.current_asset_base_url, link)
                         
                         # Avoid duplicates
-                        if self._add_image(full_url, image):
+                        if image not in self._image_basenames and self._add_image(full_url, image):
                             self.display.log("Crawler: found additional image: %s" % image)
                     
                     return "Images/" + image
