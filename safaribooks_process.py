@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from collections import Counter, deque
 from html import escape
 from queue import Queue
@@ -1819,12 +1820,17 @@ class SafariBooks:
             self.create_toc().encode("utf-8", "xmlcharrefreplace")
         )
 
-        zip_file = os.path.join(PATH, "Books", self.book_id)
-        if os.path.isfile(zip_file + ".zip"):
-            os.remove(zip_file + ".zip")
-
-        shutil.make_archive(zip_file, 'zip', self.BOOK_PATH)
-        os.rename(zip_file + ".zip", os.path.join(self.BOOK_PATH, self.epub_filename))
+        target = os.path.join(self.BOOK_PATH, self.epub_filename)
+        with zipfile.ZipFile(target, "w") as z:
+            # The EPUB standard needs mimetype first and not compressed.
+            z.write(os.path.join(self.BOOK_PATH, "mimetype"), "mimetype", compress_type=zipfile.ZIP_STORED)
+            for top in ("META-INF", "OEBPS"):
+                for root, dirs, files in os.walk(os.path.join(self.BOOK_PATH, top)):
+                    dirs.sort()
+                    for name in sorted(files):
+                        path = os.path.join(root, name)
+                        arcname = os.path.relpath(path, self.BOOK_PATH).replace(os.sep, "/")
+                        z.write(path, arcname, compress_type=zipfile.ZIP_DEFLATED)
 
     def run_conversion(self, epub_path):
         """Run convert-epub.sh to produce a cleaned final.epub via mobi round-trip."""
