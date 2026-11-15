@@ -36,3 +36,15 @@ def test_toc_drops_missing_entry_and_keeps_children():
     assert '<content src="ch2.xhtml"/>' in navmap
     assert count == 1
     assert navmap.count("<navPoint") == navmap.count("</navPoint>") == 1
+
+
+def test_create_toc_keeps_htm_chapter(sb):
+    from tests.conftest import FakeResponse
+    with open(os.path.join(sb.BOOK_PATH, "OEBPS", "ch1.htm"), "w") as f:
+        f.write("<html/>")
+    sb.requests_provider = lambda url: FakeResponse(json_data=[
+        {"depth": 1, "reference_id": "123-/ch1.htm", "fragment": "", "title": "One", "children": []}])
+    sb.filename_mapping = {}
+    sb.book_info = {"isbn": "", "authors": []}
+    sb.book_title = "T"
+    assert '<content src="ch1.htm"/>' in sb.create_toc()

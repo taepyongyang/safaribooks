@@ -1822,7 +1822,7 @@ class SafariBooks:
         # Reshape v2 TOC entries to v1 format for parse_toc
         v1_toc = self._reshape_toc_v2_to_v1(response_data)
 
-        existing = {f for f in os.listdir(os.path.join(self.BOOK_PATH, "OEBPS")) if f.endswith(".xhtml")}
+        existing = set(os.listdir(os.path.join(self.BOOK_PATH, "OEBPS")))
         navmap, _, max_depth = self.parse_toc(v1_toc, self.filename_mapping, existing=existing)
         return self.TOC_NCX.format(
             (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
