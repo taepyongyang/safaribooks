@@ -826,6 +826,14 @@ class SafariBooks:
             self._image_urls.add(full_url)
             self._image_basenames.add(basename)
             return True
+        if full_url not in self._image_urls:
+            # All images share one folder. Two URLs with one name overwrite each other.
+            message = f"Image name collision: '{basename}' is already used. Skipped: {full_url}"
+            self.display.log(message)
+            self.diagnostics.record_failure(
+                "images", full_url, FailureCategory.VALIDATION,
+                error_message=f"Image name already used by another URL: {basename}",
+            )
         return False
 
     def _add_css(self, url):
