@@ -61,3 +61,9 @@ def test_relative_image_link_is_not_a_false_collision(linker):
     linker._add_image(FILES + "/Images/fig1.png", "fig1.png")
     assert linker.link_replace("../Images/fig1.png") == "Images/fig1.png"
     assert linker.diagnostics.failures == []
+
+
+def test_svg_link_outside_image_folder_is_queued(linker):
+    link = "/api/v2/epubs/urn:orm:book:9781234567890/files/media/file107.svg"
+    assert linker.link_replace(link) == "Images/file107.svg"
+    assert linker.images == [FILES + "/media/file107.svg"]

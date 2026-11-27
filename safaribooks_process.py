@@ -850,7 +850,7 @@ class SafariBooks:
 
     @staticmethod
     def is_image_link(url: str):
-        return pathlib.Path(url).suffix[1:].lower() in ["jpg", "jpeg", "png", "gif"]
+        return MEDIA_TYPES.get(pathlib.Path(url).suffix[1:].lower(), "").startswith("image/")
 
     def link_replace(self, link):
         if link and not link.startswith("mailto"):
