@@ -25,8 +25,8 @@ def transform(cookies_string):
     with open(COOKIES_FILE, 'w') as f:
         json.dump(cookies, f)
     os.chmod(COOKIES_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600 - owner read/write only
-    print("\n\nDone! Cookie Jar saved into `cookies.json`. "
-          "Now you can run `safaribooks_refactored.py` without the `--cred` argument...")
+    print("\n\nDone. The tool saved the cookie jar in `cookies.json`.\n"
+          "Run `safaribooks.py` to download a book.")
 
 
 USAGE = "\n\n[*] Please use this command putting as argument the cookies retrieved by your browser.\n" + \
